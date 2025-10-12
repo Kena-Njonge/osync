@@ -34,13 +34,14 @@ else
 fi
 
 # Build rsync options
-rsync_opts=(-aivhP --delete --exclude=".git/" --exclude=".obsidian/" --exclude="*.gitignore")
+rsync_opts=(-aivhP --update --exclude=".git/" --exclude=".obsidian/" --exclude="*.gitignore")
 [[ $do_dryrun == true ]] && rsync_opts+=(--dry-run)
 
 # remote (source) -> local (dest)
 rsync "${rsync_opts[@]}" \
   "$remote_host:$remote_vault_dir_path" \
   "$local_vault_path"
+
 
 # Git bookkeeping (stage first, then check)
 if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
