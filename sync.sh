@@ -34,9 +34,37 @@ local_vault_no_slash=${local_vault_path%/}
 
 # I thought I would need the slashing above for the enxt step, but I don't 
 
-mapfile -t tracked_files < <(git -C $local_vault_path ls-files)
 
-# Build rsync options
-# Only update, do not delete
-rsync_opts=(-aivhP --update --exclude=".git/" --exclude=".obsidian/" --exclude="*.gitignore")
-[[ $do_dryrun == true ]] && rsync_opts+=(--dry-run)
+# Maybe we need a different seeding script, so on the first run, we run the
+# seed script to just copy stuff over 
+# So after that we would be correct in assuming that if something is tracked
+# But not in remote, then it is wrong. 
+
+# I forgot why I needed this, but I will need it in a moment
+# Also could be called local files 
+mapfile -t tracked_files < <(git -C "$local_vault_path" ls-files)
+
+# Remote files, full list
+mapfile -t remote_files  < <(rsync -ah --dry-run --delete --itemize-changes "$local_vault_path" "$remote_host:$remote_vault_dir_path)" --exclude=".git/" --exclude='.obsidian/' --out-format='%n'
+
+
+declare -A set
+
+for path in $remote_files;do
+	set["$path"]=1
+done;
+
+deleted_files_remote=()
+for path in tracked_files; do
+	# If it is true that it is unset or null in the remote
+	if [[ ${set[$path]:-0} ]];then
+		$deleted_files_remote=("${deleted_files_remote[@]}" "$path") 
+	fi
+done
+
+# Send update, so now all files that should be deleted (deleted on local)
+# Will be deleted
+
+mapfile -t remote_files  < <(rsync -ah --dry-run --delete --itemize-changes "$local_vault_path" "$remote_host:$remote_vault_dir_path)" --exclude=".git/" --exclude='.obsidian/' --out-format='%n'
+
+
