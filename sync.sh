@@ -2,106 +2,124 @@
 set -euo pipefail
 
 # Usage: sync.sh <local_vault_path> [--realrun]
-# Exit if unset or null
-: "${1:?Usage: $(basename "$0") <local_vault_path> [--realrun]}"
+: "${1:?Usage: $(basename "$0") <local_vault_path> [--realrun] [--seed]}"
 
-# local_vault_path should be the supervault path
+# Paths
 local_vault_path="$1"
+remote_host="termux"
+remote_vault_dir_path='~/storage/shared/Obsidian/'   # ~ expands on the REMOTE
 
-# does the local_vault_path exist?
+# Validate local dir
 if [[ ! -d "$local_vault_path" ]]; then
   echo "The provided path is not a directory. Please specify a valid path."
   exit 1
 fi
 
-remote_host="termux"
-# let ~ not expand
-remote_vault_dir_path='~/storage/shared/Obsidian/'
+# Validate remote dir
+if ssh -o BatchMode=yes -o ConnectTimeout=5 "$remote_host" "[ -d $remote_vault_dir_path ]"; then
+  echo "Remote dir exists: $remote_host:$remote_vault_dir_path"
+else
+  echo "Remote dir NOT found: $remote_host:$remote_vault_dir_path"
+  exit 1
+fi
 
-# dry-run toggle (default true; --realrun disables)
+
+# Dry-run toggle (default true; --realrun disables)
 do_dryrun=true
 [[ ${2:-} == '--realrun' ]] && do_dryrun=false
 
-# Whether to transfer the contents of the dir or the dir itself
-# Normalize to have a trailing slash so we send the *contents*
-$local_vault_path="${local_vault_path%/}/"
+# Seed toggle (default false) 
+seed=false
+[[ ${3:-} == '--seed' ]] && seed=true
+# Normalize source to send *contents*
+local_src="${local_vault_path%/}/"
 
 echo "Local:  $local_src"
 echo "Remote: $remote_host:$remote_vault_dir_path"
 echo "Mode:   $([[ $do_dryrun == true ]] && echo DRY-RUN || echo REAL RUN)"
 
-# The dry-run switch is injected via this array
+# Inject dry-run switch
 RSYNC_DRY=()
-if [[ $do_dryrun == true ]]; then
-  RSYNC_DRY=(--dry-run)
-fi
+[[ $do_dryrun == true ]] && RSYNC_DRY=(--dry-run)
 
+# ----------------- Deletions discovery -----------------
 
-# Local tracked files 
+# Local tracked files
 mapfile -t tracked_files < <(git -C "$local_vault_path" ls-files)
 
-# Remote files, full list
+# Remote inventory (relative paths, filtered)
 mapfile -t remote_files < <(
   ssh "$remote_host" "cd $remote_vault_dir_path && \
     find . -type f ! -path './.git/*' ! -path './.obsidian/*' -printf '%P\n'"
 )
 
-# make a remote set
+# Remote set for membership tests
 declare -A remote_set=()
 for p in "${remote_files[@]}"; do
   remote_set["$p"]=1
 done
 
-# what local tracks but remote doesn’t have → deleted on remote
+# Tracked locally but absent on remote => remote deletion happened
 deleted_files_remote=()
 for p in "${tracked_files[@]}"; do
-# If wasn't on remote, string will be empty
   if [[ -z ${remote_set[$p]+_} ]]; then
     deleted_files_remote+=("$p")
   fi
 done
 
-# what local deleted since last commit → deleted on local
+# Deleted locally since last commit (git knows) => local deletion happened
 mapfile -t deleted_files_local < <(git -C "$local_vault_path" ls-files --deleted)
 
+# ----------------- Deletions propagation -----------------
 
+if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1 && [[ ! $seed ]]; then
+  del_opts=(-a --delete-missing-args --ignore-missing-args)
+  [[ $do_dryrun == true ]] && del_opts+=(--dry-run)
 
-if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  # Delete on remote the files missing locally
+  if ((${#deleted_files_local[@]})); then
+    tmp="$(mktemp)"; printf '%s\n' "${deleted_files_local[@]}" >"$tmp"
+    rsync "${del_opts[@]}" \
+      --exclude=".git/" --exclude=".obsidian/" \
+      --files-from="$tmp" \
+      "$local_src" "$remote_host:$remote_vault_dir_path"
+    rm -f "$tmp"
+  fi
 
-	del_opts=(-a --delete-missing-args --ignore-missing-args)
-	[[ $do_dryrun == true ]] && del_opts+=(--dry-run)
+  # Delete on local the files missing on remote
+  if ((${#deleted_files_remote[@]})); then
+    tmp="$(mktemp)"; printf '%s\n' "${deleted_files_remote[@]}" >"$tmp"
+    rsync "${del_opts[@]}" \
+      --exclude=".git/" --exclude=".obsidian/" \
+      --files-from="$tmp" \
+      "$remote_host:$remote_vault_dir_path" "$local_src"
+    rm -f "$tmp"
+  fi
 
-	if ((${#deleted_files_local[@]})); then
-	  tmp="$(mktemp)"; printf '%s\n' "${deleted_files_local[@]}" >"$tmp"
-	  # delete on remote (local is missing them)
-	  rsync "${del_opts[@]}" --files-from="$tmp" \
-	    "$local_vault_path" "$remote_host:$remote_vault_dir_path"
-	  rm -f "$tmp"
-	fi
-
-	if ((${#deleted_files_remote[@]})); then
-	  tmp="$(mktemp)"; printf '%s\n' "${deleted_files_remote[@]}" >"$tmp"
-	  # delete on local (remote is missing them)
-	  rsync "${del_opts[@]}" --files-from="$tmp" \
-	    "$remote_host:$remote_vault_dir_path" "$local_vault_path"
-	  rm -f "$tmp"
-	fi
-
-
-
-	# Send update both ways, new files are created now
-
-	rsync -ah ${RSYNC_DRY[@]} --update --itemize-changes "$local_vault_path" "$remote_host":"$remote_vault_dir_path" --exclude=".git/" --exclude='.obsidian/' --out-format='%n'
-
-	rsync -ah ${RSYNC_DRY[@]} --update --itemize-changes  "$remote_host":"$remote_vault_dir_path" "$local_vault_path" --exclude=".git/" --exclude='.obsidian/' --out-format='%n'
-
+elif git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1 && [[ $seed ]]; then 
+	# On seed, we have never transfered files, so we just want to transfer and set our status to 1
+	# We also don't worry about deletions.
+	# so we won't overwrite anything in the remote, they will be added as new in the next sync assuming they ahdn't been tracked yet
+	rsync -ah "${RSYNC_DRY[@]}" --update --itemize-changes \
+	  --exclude=".git/" --exclude=".obsidian/" \
+	  "$local_src" "$remote_host:$remote_vault_dir_path"
 else
-	echo "Not a git repo at $local_vault_path; To avoid sideffects and mistakes, the operation is aborted."
-	exit 1
+  echo "Not a git repo at $local_vault_path; To avoid side effects and mistakes, the operation is aborted."
+  exit 1
 fi
 
-# If we are here, all changes have been propagated, now we only need to update the git.
-# Git bookkeeping (Commit and Push)
+# ----------------- Updates both ways -----------------
+
+rsync -ah "${RSYNC_DRY[@]}" --update --itemize-changes \
+  --exclude=".git/" --exclude=".obsidian/" \
+  "$local_src" "$remote_host:$remote_vault_dir_path"
+
+rsync -ah "${RSYNC_DRY[@]}" --update --itemize-changes \
+  --exclude=".git/" --exclude=".obsidian/" \
+  "$remote_host:$remote_vault_dir_path" "$local_src"
+
+# ----------------- Git bookkeeping -----------------
+
 if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   git -C "$local_vault_path" add -A
   if ! git -C "$local_vault_path" diff --cached --quiet; then
@@ -113,3 +131,4 @@ if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; t
 else
   echo "Not a git repo at $local_vault_path; skipping git steps."
 fi
+
