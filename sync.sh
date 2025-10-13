@@ -65,36 +65,7 @@ mapfile -t remote_files < <(
 echo "Testing remote find command..."
 ssh "$remote_host" "cd $remote_vault_dir_path && pwd && ls -la | head -5"
 
-# Normalize path encoding
-# Doesn't quite work
-normalize_array_nfc() {
-  command -v python3 >/dev/null 2>&1 || return 0  # no-op if python missing
-  local -n _arr="$1"
-  
-  # If array is empty, nothing to do
-  [[ ${#_arr[@]} -eq 0 ]] && return 0
-  
-  local temp_result=()
-  mapfile -d '' temp_result < <(
-    printf '%s\0' "${_arr[@]}" |
-    python3 -c '
-import sys, unicodedata
-data = sys.stdin.buffer.read().split(b"\0")
-for b in data:
-    if not b: continue
-    s = b.decode("utf-8","surrogatepass")
-    print(unicodedata.normalize("NFC", s), end="\0")
-'
-  )
-  
-  # Only update array if we got results
-  if [[ ${#temp_result[@]} -gt 0 ]]; then
-    _arr=("${temp_result[@]}")
-  fi
-}
 
-normalize_array_nfc tracked_files
-normalize_array_nfc remote_files
 
 
 # Remote set for membership tests (using raw paths for comparison)
