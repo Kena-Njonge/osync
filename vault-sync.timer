@@ -1,0 +1,12 @@
+[Unit]
+Description=Timer for vault-sync.service
+Wants=vault-sync.service
+
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=30s
+Persistent=true
+Unit=vault-sync.service
+
+[Install]
+WantedBy=timers.target

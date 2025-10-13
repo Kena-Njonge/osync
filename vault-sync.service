@@ -1,0 +1,13 @@
+# /etc/systemd/system/vault-sync.service
+[Unit]
+Description=Vault sync (locked, oneshot)
+
+[Service]
+Type=oneshot
+User=<USERNAME>
+# Creates /run/vault-sync owned by User= at start
+RuntimeDirectory=vault-sync
+# Fail immediately if another run is in progress
+ExecStart=/usr/bin/flock -n /run/vault-sync/lock <PATH_TO_SCRIPT>  <PATH_TO_OBSIDIAN_DIR_THROUGH_WSL> --realrun
+Restart=no
+
