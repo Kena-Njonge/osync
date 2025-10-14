@@ -15,12 +15,19 @@ collect_status_paths() {
 
   while (( idx < total )); do
     entry="${raw_entries[idx]}"
+    # Not += because 0 would cause fail 
     (( idx+=1 ))
     [[ -z "$entry" ]] && continue
 
-    local status="${entry:0:2}"
-    local path="${entry:3}"
+    local path="$entry"
 
+    if (( ${#entry} >= 3 )) && [[ "${entry:2:1}" == ' ' ]]; then
+      path="${entry:3}"
+    fi
+
+    if should_skip_path "$path"; then
+      continue
+    fi
     [[ -n "$path" ]] && seen["$path"]=1
   done
 
@@ -43,6 +50,56 @@ declare -A remote_set=()
 declare -A remote_dir_has_files=()
 declare -A local_dir_has_files=()
 
+debug_enabled=${SYNC_DEBUG:-false}
+
+
+# Debugging functions
+debug_log() {
+  [[ "$debug_enabled" != true ]] && return 0
+  printf '[DEBUG] %s\n' "$*"
+}
+
+debug_dump_array() {
+  [[ "$debug_enabled" != true ]] && return 0
+  local -n _arr="$1"
+  local label="$2"
+  printf '[DEBUG] %s (%d)\n' "$label" "${#_arr[@]}"
+  for item in "${_arr[@]}"; do
+    printf '         %s\n' "$item"
+  done
+}
+
+debug_dump_bytes() {
+  [[ "$debug_enabled" != true ]] && return 0
+  local label="$1"
+  local value="$2"
+  local hex
+  hex=$(printf '%s' "$value" | python3 - <<'PY'
+import sys, binascii
+data = sys.stdin.buffer.read()
+sys.stdout.write(binascii.hexlify(data).decode('ascii'))
+PY
+)
+  printf '[DEBUG] %s bytes: %s\n' "$label" "$hex"
+}
+
+# Quote path correctly so that we don't expand ~ locally
+quote_remote_path() {
+  local path="$1"
+  if [[ "$path" == ~* ]]; then
+    local prefix rest
+    prefix="${path%%/*}"
+    rest="${path#"$prefix"}"
+    if [[ "$rest" == "$path" ]]; then
+      printf '%s' "$prefix"
+      return
+    fi
+    printf '%s%s' "$prefix" "$(printf '%q' "$rest")"
+  else
+    printf '%q' "$path"
+  fi
+}
+
 ledger_filename=".vault-directories"
 ledger_local_path=""
 declare -A ledger_prev_set=()
@@ -50,13 +107,39 @@ declare -A ledger_prev_set=()
 echo "Arguments: $@"
 
 
-# Usage: sync.sh <local_vault_path> [--realrun] [--seed]
-: "${1:?Usage: $(basename "$0") <local_vault_path> [--realrun] [--seed]}"
+usage="Usage: $(basename "$0") <local_path> <remote_host> <remote_dir> [--realrun] [--seed]"
+if (( $# < 3 )); then
+  echo "$usage" >&2
+  exit 1
+fi
 
-# Paths
 local_vault_path="$1"
-remote_host="termux"
-remote_vault_dir_path='~/storage/shared/Obsidian/'   # ~ expands on the REMOTE
+remote_host="$2"
+remote_vault_dir_path="$3"
+shift 3
+
+# Allow flags in either order
+do_dryrun=true
+seed=false
+while (($#)); do
+  case "$1" in
+    --realrun)
+      do_dryrun=false
+      ;;
+    --seed)
+      seed=true
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      echo "$usage" >&2
+      exit 1
+      ;;
+  esac
+  shift
+done
+
+local_src="${local_vault_path%/}/"
+remote_vault_dir_path="${remote_vault_dir_path%/}/"
 
 # Validate local dir
 if [[ ! -d "$local_vault_path" ]]; then
@@ -64,26 +147,24 @@ if [[ ! -d "$local_vault_path" ]]; then
   exit 1
 fi
 
+remote_dir_shell="$(quote_remote_path "$remote_vault_dir_path")"
+remote_rsync_dir="$remote_host:$(quote_remote_path "$remote_vault_dir_path")"
+
 # Validate remote dir
-if ssh -o BatchMode=yes -o ConnectTimeout=5 "$remote_host" "[ -d $remote_vault_dir_path ]"; then
+if ssh -o BatchMode=yes -o ConnectTimeout=5 "$remote_host" "test -d $remote_dir_shell"; then
   echo "Remote dir exists: $remote_host:$remote_vault_dir_path"
 else
   echo "Remote dir NOT found: $remote_host:$remote_vault_dir_path"
   exit 1
 fi
 
-
-# Dry-run toggle (default true; --realrun disables)
-do_dryrun=true
-[[ ${2:-} == '--realrun' ]] && do_dryrun=false
-
-# Seed toggle (default false) 
-seed=false
-[[ ${3:-} == '--seed' ]] && seed=true
-# Normalize source to send *contents*
-local_src="${local_vault_path%/}/"
-
-
+# Validate local dir is repository
+if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "We are in a git repository, continuing"
+else
+  echo "Please run this code in a git repository, see the tutorial"
+  exit 1
+fi
 # ------- DEBUGGIGN -------
 echo "Local:  $local_src"
 echo "Remote: $remote_host:$remote_vault_dir_path"
@@ -98,11 +179,13 @@ RSYNC_DRY=()
 # Ensure UTF-8 locale so non-ASCII filenames are handled predictably
 export LANG=${LANG:-en_US.UTF-8}
 
-# Build a sorted union of local/remote directories so the ledger stays authoritative.
+# Build a sorted union of currently existing local/remote directories
+# so the ledger stays authoritative.
 build_directory_snapshot() {
   local -n _out="$1"
   declare -A seen=()
 
+  # Don't include cwd . or empty string dirrs
   for dir in "${local_dirs[@]}"; do
     [[ -z "$dir" || "$dir" == "." ]] && continue
     seen["$dir"]=1
@@ -117,6 +200,7 @@ build_directory_snapshot() {
     return
   fi
 
+  # Map to array and remove trailing delim
   mapfile -t _out < <(printf '%s\n' "${!seen[@]}" | LC_ALL=C sort)
 }
 
@@ -127,6 +211,8 @@ load_ledger_into_memory() {
     return
   fi
 
+  # Read each line verbatim, ignoring spaces (IFS) and slashes 
+  # Or so we don't skip last line
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ -z "$line" ]] && continue
     ledger_prev_set["$line"]=1
@@ -144,7 +230,8 @@ push_ledger_to_remote() {
     rsync_flags+=(--dry-run)
   fi
 
-  rsync "${rsync_flags[@]}" -- "$src" "$remote_host:${remote_vault_dir_path}${ledger_filename}"
+  local target="$remote_host:$(quote_remote_path "${remote_vault_dir_path}${ledger_filename}")"
+  rsync "${rsync_flags[@]}" -- "$src" "$target"
 }
 
 # Ensure the ledger exists (or seed it) before any pruning logic runs.
@@ -163,6 +250,9 @@ ensure_ledger_ready() {
       return
     fi
 
+    # Write directories, both local and remote into the shared ledger
+    # Thus this unifies the two "histories" on seed. 
+    # Same happens to files i.e. we jsut propagate the files that exist later on
     {
       for dir in "${snapshot[@]}"; do
         printf '%s\n' "$dir"
@@ -180,7 +270,7 @@ ensure_ledger_ready() {
 
   local tmp
   tmp="$(mktemp)"
-  if ! ssh "$remote_host" "cd $remote_vault_dir_path && cat '$ledger_filename'" > "$tmp"; then
+  if ! ssh "$remote_host" "cd $remote_dir_shell && cat '$ledger_filename'" > "$tmp"; then
     echo "Ledger file missing remotely at ${remote_vault_dir_path}${ledger_filename}. Run with --seed to initialize." >&2
     rm -f "$tmp"
     exit 1
@@ -202,6 +292,7 @@ finalize_ledger_state() {
   build_directory_snapshot snapshot
   local tmp
   tmp="$(mktemp)"
+  # Append to end of file
   {
     for dir in "${snapshot[@]}"; do
       printf '%s\n' "$dir"
@@ -222,6 +313,7 @@ finalize_ledger_state() {
 
   ledger_local_path="${ledger_local_path:-$local_vault_path/$ledger_filename}"
 
+  # Write vault-directories
   mv "$tmp" "$ledger_local_path"
   paths_to_stage["$ledger_filename"]=1
 
@@ -232,11 +324,12 @@ finalize_ledger_state() {
 
 refresh_inventory() {
   # Collect tracked paths relative to repo root (NUL-delimited to preserve bytes)
+  # -z sets the delimiter to \0 because it can't be contained in a file name
   mapfile -d '' tracked_files < <(git -C "$local_vault_path" ls-files -z)
 
   # Remote inventories gathered with C locale to avoid locale-specific comparisons
   mapfile -d '' remote_files < <(
-    ssh "$remote_host" "cd $remote_vault_dir_path && \
+    ssh "$remote_host" "cd $remote_dir_shell && \
       LC_ALL=C find . -type f ! -path '*/.git/*' ! -path '*/.obsidian/*' ! -path '*/.trash/*' -print0 2>/dev/null"
   )
 
@@ -244,13 +337,10 @@ refresh_inventory() {
   for idx in "${!remote_files[@]}"; do
     remote_files[$idx]="${remote_files[$idx]#./}"
   done
-  for idx in "${!local_files[@]}"; do
-    local_files[$idx]="${local_files[$idx]#./}"
-  done
 
   # Mirror remote directory inventory so we can prune empty folders later
   mapfile -d '' remote_dirs < <(
-    ssh "$remote_host" "cd $remote_vault_dir_path && \
+    ssh "$remote_host" "cd $remote_dir_shell && \
       LC_ALL=C find . -type d ! -path '*/.git*' ! -path '*/.obsidian*' ! -path '*/.trash*' -print0 2>/dev/null"
   )
 
@@ -272,6 +362,9 @@ refresh_inventory() {
 
   for idx in "${!local_dirs[@]}"; do
     local_dirs[$idx]="${local_dirs[$idx]#./}"
+  done
+  for idx in "${!local_files[@]}"; do
+    local_files[$idx]="${local_files[$idx]#./}"
   done
 
   # Helper to run the list through Python's NFC normalizer if python3 is present
@@ -307,6 +400,7 @@ for b in data:
   normalize_array_nfc local_files
   normalize_array_nfc local_dirs
 
+
   remote_dir_has_files=()
   for path in "${remote_files[@]}"; do
     cur="${path%/*}"
@@ -323,9 +417,12 @@ for b in data:
     done
   done
 
+
   local_dir_has_files=()
+
   for path in "${local_files[@]}"; do
     cur="${path%/*}"
+    # If path is . or a file remove it, so that we don't fail trying to walk up
     if [[ "$cur" == "$path" ]]; then
       cur=""
     fi
@@ -358,15 +455,22 @@ for b in data:
     remote_set["$p"]=1
   done
 
+  # No need for local set, we just query the fs to see if it is there later on
+
+
   mapfile -d '' deleted_files_local < <(git -C "$local_vault_path" ls-files --deleted -z)
   normalize_array_nfc deleted_files_local
 
   deleted_files_remote=()
   for p in "${tracked_files[@]}"; do
-    if [[ -z ${remote_set["$p"]+_} ]] && [[ -f "$local_vault_path/$p" ]]; then
+    if [[ ! -v remote_set["$p"] ]] && [[ -f "$local_vault_path/$p" ]]; then
       deleted_files_remote+=("$p")
     fi
   done
+
+  debug_log "refresh_inventory: local_files=${#local_files[@]} remote_files=${#remote_files[@]}"
+  debug_dump_array deleted_files_local "deleted_files_local"
+  debug_dump_array deleted_files_remote "deleted_files_remote"
 }
 
 should_skip_path() {
@@ -375,7 +479,6 @@ should_skip_path() {
 }
 
 # Ensure remote/local deletions settle before we run the bidirectional sync
-# Ensure remote/local deletions settle before we run the bidirectional sync.
 # The routine loops until both sides agree, handling files first and then
 # pruning now-empty directories so the later rsync passes don’t resurrect them.
 reconcile_deletions() {
@@ -400,8 +503,13 @@ reconcile_deletions() {
       if should_skip_path "$f"; then
         continue
       fi
-      if [[ -n ${remote_set["$f"]+} ]]; then
+      debug_log "checking remote delete candidate: $(printf '%q' "$f")"
+      debug_dump_bytes "candidate_bytes" "$f"
+      if [[ -v remote_set["$f"] ]]; then
         remote_delete_files+=("$f")
+        debug_log "queue remote delete: $(printf '%q' "$f") (remote_has=yes)"
+      else
+        debug_log "skip remote delete: $(printf '%q' "$f") (remote_has=no)"
       fi
     done
 
@@ -412,13 +520,13 @@ reconcile_deletions() {
         continue
       fi
       [[ -z "$dir" || "$dir" == "." ]] && continue
-      if [[ -z ${ledger_prev_set["$dir"]+} ]]; then
+      if [[ ! -v ledger_prev_set["$dir"] ]]; then
         continue
       fi
-      if [[ -n ${local_dir_set["$dir"]+} ]]; then
+      if [[ -v local_dir_set["$dir"] ]]; then
         continue
       fi
-      if [[ -n ${remote_dir_has_files["$dir"]+} ]]; then
+      if [[ -v remote_dir_has_files["$dir"] ]]; then
         continue
       fi
       remote_dirs_to_prune+=("$dir")
@@ -445,17 +553,22 @@ reconcile_deletions() {
         continue
       fi
       [[ -z "$dir" || "$dir" == "." ]] && continue
-      if [[ -z ${ledger_prev_set["$dir"]+} ]]; then
+      if [[ ! -v ledger_prev_set["$dir"] ]]; then
         continue
       fi
-      if [[ -n ${remote_dir_set["$dir"]+} ]]; then
+      if [[ -v remote_dir_set["$dir"] ]]; then
         continue
       fi
-      if [[ -n ${local_dir_has_files["$dir"]+} ]]; then
+      if [[ -v local_dir_has_files["$dir"] ]]; then
         continue
       fi
       local_dirs_to_prune+=("$dir")
     done
+
+    debug_dump_array remote_delete_files "remote_delete_files"
+    debug_dump_array remote_dirs_to_prune "remote_dirs_to_prune"
+    debug_dump_array local_delete_files "local_delete_files"
+    debug_dump_array local_dirs_to_prune "local_dirs_to_prune"
 
     if (( ${#remote_delete_files[@]} == 0 && ${#remote_dirs_to_prune[@]} == 0 && ${#local_delete_files[@]} == 0 && ${#local_dirs_to_prune[@]} == 0 )); then
       if (( iteration == 1 )); then
@@ -475,7 +588,9 @@ reconcile_deletions() {
       remote_file_actions=$((remote_file_actions + ${#remote_delete_files[@]}))
       printf '%s\n' "${remote_delete_files[@]}" | head -n 10
       for path in "${remote_delete_files[@]}"; do
-        paths_to_stage["$path"]=1
+        if ! should_skip_path "$path"; then
+          paths_to_stage["$path"]=1
+        fi
       done
       if [[ $do_dryrun == true ]]; then
         echo "DRY-RUN: skipping remote deletions"
@@ -483,7 +598,7 @@ reconcile_deletions() {
         echo "[remote] deleting files:"
         printf '%s\n' "${remote_delete_files[@]}"
         printf '%s\0' "${remote_delete_files[@]}" | \
-          ssh "$remote_host" "cd $remote_vault_dir_path && xargs -0 rm -f --"
+          ssh "$remote_host" "cd $remote_dir_shell && xargs -0 rm -f --"
       fi
     fi
 
@@ -497,7 +612,7 @@ reconcile_deletions() {
         echo "[remote] pruning directories:"
         printf '%s\n' "${remote_dirs_to_prune[@]}"
         printf '%s\0' "${remote_dirs_to_prune[@]}" | \
-          ssh "$remote_host" "cd $remote_vault_dir_path && while IFS= read -r -d '' dir; do [ -z \"\$dir\" ] && continue; rmdir -- \"\$dir\" 2>/dev/null || true; done"
+          ssh "$remote_host" "cd $remote_dir_shell && while IFS= read -r -d '' dir; do [ -z \"\$dir\" ] && continue; rmdir -- \"\$dir\" 2>/dev/null || true; done"
       fi
     fi
 
@@ -506,7 +621,9 @@ reconcile_deletions() {
       local_file_actions=$((local_file_actions + ${#local_delete_files[@]}))
       printf '%s\n' "${local_delete_files[@]}" | head -n 10
       for path in "${local_delete_files[@]}"; do
-        paths_to_stage["$path"]=1
+        if ! should_skip_path "$path"; then
+          paths_to_stage["$path"]=1
+        fi
       done
       if [[ $do_dryrun == true ]]; then
         echo "DRY-RUN: skipping local deletions"
@@ -571,15 +688,22 @@ process_rsync_log() {
     if [[ "$line" =~ ^[0-9]{4}/[0-9]{2}/[0-9]{2}[[:space:]][0-9]{2}:[0-9]{2}:[0-9]{2}[[:space:]] ]]; then
       line="${line#*[[:space:]]}"
       line="${line#*[[:space:]]}"
+      # Literally a space in the regex, lol 
       line="${line#*] }"
+    
+    # Incase there is not time information at the start
     elif [[ "$line" == *"] "* ]]; then
       line="${line#*] }"
     fi
+    # Escaping spaces caues regex patterns are unquoted
     [[ "$line" =~ ^(sent[[:space:]]|sending\ incremental\ file\ list|receiving\ file\ list|building\ file\ list|created\ directory|total\ size\ is|total\ transferred\ file\ size) ]] && continue
     local path="${line%% -> *}"
     path="${path#./}"
     path="${path%/}"
     [[ -z "$path" ]] && continue
+    if should_skip_path "$path"; then
+      continue
+    fi
     paths_to_stage["$path"]=1
   done < "$logfile"
 }
@@ -588,7 +712,10 @@ process_rsync_log() {
 run_tracked_rsync() {
   local tmp_log
   tmp_log="$(mktemp)"
+
+  # So that rsync doesn't bail out, another bashism
   set +e
+  
   rsync --itemize-changes --out-format='%i %n%L' --log-file="$tmp_log" --log-file-format='%n%L' "$@"
   local rsync_exit=$?
   set -e
@@ -598,7 +725,7 @@ run_tracked_rsync() {
 }
 
 echo "Testing remote find command..."
-ssh "$remote_host" "cd $remote_vault_dir_path && pwd && ls -la | head -5"
+ssh "$remote_host" "cd $remote_dir_shell && pwd && ls -la | head -5"
 
 refresh_inventory
 
@@ -620,6 +747,9 @@ if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1 &&
   fi
 
   # Remember which paths were dirty before we touched anything, so staging stays scoped
+  # Dirty meaning M, A, D, ?? in git status--porcelain
+  # We remember them before we do anything to prevent race conditions due to changes while working
+  # If we were just to stage dirs some chagnes would be lost
   initial_status_paths=()
   collect_status_paths initial_status_paths
   for path in "${initial_status_paths[@]}"; do
@@ -633,6 +763,7 @@ elif git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1 
 	# We also don't worry about deletions.
 	# so we won't overwrite anything in the remote, they will be added as new in the next sync assuming they ahdn't been tracked yet
 	# We just continue, the script, do nothing here
+  # We also create the original dir list, otherwise we wouldn't be able to create or delete dirs lol
   echo "We are in seed mode"
 	:
 else
@@ -644,11 +775,11 @@ fi
 
 run_tracked_rsync -rltivPh "${RSYNC_DRY[@]}" --update \
   --exclude=".git/" --exclude=".obsidian/" --exclude=".trash/" \
-  "$local_src" "$remote_host:$remote_vault_dir_path"
+  "$local_src" "$remote_rsync_dir"
 
 run_tracked_rsync -rltivPh "${RSYNC_DRY[@]}" --update \
   --exclude=".git/" --exclude=".obsidian/" --exclude=".trash/" \
-  "$remote_host:$remote_vault_dir_path" "$local_src"
+  "$remote_rsync_dir" "$local_src"
 
 # Update inventories post-sync so the ledger reflects the settled state
 refresh_inventory
@@ -669,6 +800,9 @@ if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; t
     mapfile -d '' remaining_status < <(git -C "$local_vault_path" status --porcelain -z)
     leftover=false
     # Warn if new worktree changes popped up mid-run; we still commit the staged subset.
+    # If someone is editing while we are running, it is not horrible, but that edit
+    # Will be commited in the next batch, not in this batch, we jsut silently warn it is 
+    # A minor inconsistency for thsi case
     for entry in "${remaining_status[@]}"; do
       [[ -z "$entry" ]] && continue
       if (( ${#entry} < 3 )) || [[ "${entry:2:1}" != ' ' ]]; then
