@@ -76,6 +76,20 @@ rm "$tmp_local/local.txt"
 run_sync
 assert_file_missing_remote "local.txt"
 
+log 'Test: ignored directory stays local'
+mkdir -p "$tmp_local/ignored_dir/sub"
+printf 'ignored' > "$tmp_local/ignored_dir/sub/file.txt"
+run_sync --ignore ignored_dir
+assert_file_missing_remote "ignored_dir/sub/file.txt"
+rm -rf "$tmp_local/ignored_dir"
+
+log 'Test: ignored directory stays remote'
+ssh "$remote_host" "mkdir -p '$tmp_remote/ignored_remote/sub'"
+ssh "$remote_host" "printf ignored > '$tmp_remote/ignored_remote/sub/file.txt'"
+run_sync --ignore ignored_remote
+assert_file_missing_local "ignored_remote/sub/file.txt"
+ssh "$remote_host" "rm -rf '$tmp_remote/ignored_remote'"
+
 log 'Test: remote deletion propagates to local'
 ssh "$remote_host" "rm '$tmp_remote/remote.txt'"
 run_sync
