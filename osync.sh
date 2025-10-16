@@ -1,4 +1,7 @@
 #!/bin/bash
+# osync - Git-aware vault synchronization script
+# Copyright (c) 2025 Kena Njonge
+# Licensed under the MIT License. See LICENSE for details.
 set -euo pipefail
 
 # Capture the repo status ahead of the run so we know which paths were
