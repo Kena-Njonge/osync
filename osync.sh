@@ -47,11 +47,14 @@ declare -a local_files=()
 declare -a local_dirs=()
 declare -a deleted_files_local=()
 declare -a deleted_files_remote=()
+declare -a ignore_dirs=()
+declare -a RSYNC_EXCLUDES=()
 declare -A remote_dir_set=()
 declare -A local_dir_set=()
 declare -A remote_set=()
 declare -A remote_dir_has_files=()
 declare -A local_dir_has_files=()
+declare -A ignore_dir_set=()
 
 debug_enabled=${SYNC_DEBUG:-false}
 
@@ -103,6 +106,102 @@ quote_remote_path() {
   fi
 }
 
+# Add a Directory to the ignore set
+add_ignore_dir() {
+  local dir="$1"
+
+  if [[ -z "$dir" ]]; then
+    echo "Ignore directory cannot be empty." >&2
+    exit 1
+  fi
+
+  # Normalize: remove leading ./, trailing /, enforce relative path
+  while [[ "$dir" == ./* ]]; do
+    dir="${dir#./}"
+  done
+  dir="${dir%/}"
+
+  if [[ -z "$dir" || "$dir" == "." ]]; then
+    echo "Ignore directory cannot reference the repository root." >&2
+    exit 1
+  fi
+  if [[ "$dir" == /* ]]; then
+    echo "Ignore directories must be relative to the directory of the script (no leading /): $dir" >&2
+    exit 1
+  fi
+  if [[ "$dir" == *"../"* || "$dir" == ".." || "$dir" == "../" ]]; then
+    echo "Ignore directories cannot traverse upward: $dir" >&2
+    exit 1
+  fi
+
+  # No need for globs, excluding a dir excludes everything underneath it also
+  if [[ "$dir" == *"*"* || "$dir" == *"?"* || "$dir" == *"["* ]]; then
+    echo "Ignore directories cannot include glob characters: $dir" >&2
+    exit 1
+  fi
+
+  if [[ -v ignore_dir_set["$dir"] ]]; then
+    return
+  fi
+
+  ignore_dirs+=("$dir")
+  ignore_dir_set["$dir"]=1
+}
+
+# Essentially build the prune command and or'd expression that will be used to ignore
+# the directories when they match, thus the find won't return/process them further
+build_find_prune_components() {
+  local -n _dest="$1"
+  _dest=()
+  (( ${#ignore_dirs[@]} == 0 )) && return
+
+  _dest+=("(")
+  local first=true
+  local dir normalized path
+  for dir in "${ignore_dirs[@]}"; do
+
+    normalized="${dir%/}"
+    [[ -z "$normalized" ]] && continue
+    path="./$normalized"
+    if [[ $first == false ]]; then
+      _dest+=("-o")
+    fi
+    _dest+=("-path" "$path")
+    _dest+=("-o" "-path" "$path/*")
+    first=false
+  done
+  # Short-circuit the prune
+  _dest+=(")" "-prune" "-o")
+}
+
+# Assemble full find args (start dir, optional prune block, type filter, print0).
+# print0 (NUL-separated output) only fires when the prune condition is not met.
+make_find_args() {
+  local type="$1"
+  local -n _dest="$2"
+  _dest=(".")
+  local -a prune_parts=()
+  build_find_prune_components prune_parts
+  if (( ${#prune_parts[@]} > 0 )); then
+    _dest+=("${prune_parts[@]}")
+  fi
+  _dest+=("-type" "$type" "-print0")
+}
+
+# Just convenience function to bundle in the creation of the find command, calls the above 2 functions
+make_remote_find_command() {
+  local type="$1"
+  local -a args=()
+  make_find_args "$type" args
+  local cmd="LC_ALL=C find"
+  local arg
+  for arg in "${args[@]}"; do
+    cmd+=" $(printf '%q' "$arg")"
+  done
+  cmd+=" 2>/dev/null"
+  printf '%s' "$cmd"
+}
+
 ledger_filename=".vault-directories"
 ledger_local_path=""
 declare -A ledger_prev_set=()
@@ -110,7 +209,7 @@ declare -A ledger_prev_set=()
 echo "Arguments: $@"
 
 
-usage="Usage: $(basename "$0") <local_path> <remote_host> <remote_dir> [--realrun] [--seed]"
+usage="Usage: $(basename "$0") <local_path> <remote_host> <remote_dir> [--realrun] [--seed] [--ignore DIR]..."
 if (( $# < 3 )); then
   echo "$usage" >&2
   exit 1
@@ -124,13 +223,29 @@ shift 3
 # Allow flags in either order
 do_dryrun=true
 seed=false
+add_ignore_dir ".git"
 while (($#)); do
   case "$1" in
     --realrun)
       do_dryrun=false
+      shift
       ;;
     --seed)
       seed=true
+      shift
+      ;;
+    --ignore)
+      if (( $# < 2 )); then
+        echo "--ignore requires a directory argument." >&2
+        echo "$usage" >&2
+        exit 1
+      fi
+      add_ignore_dir "$2"
+      shift 2
+      ;;
+    --ignore=*)
+      add_ignore_dir "${1#*=}"
+      shift
       ;;
     *)
       echo "Unknown argument: $1" >&2
@@ -138,7 +253,6 @@ while (($#)); do
       exit 1
       ;;
   esac
-  shift
 done
 
 local_src="${local_vault_path%/}/"
@@ -178,6 +292,10 @@ echo "Mode:   $([[ $do_dryrun == true ]] && echo DRY-RUN || echo REAL RUN)"
 # Inject dry-run switch
 RSYNC_DRY=()
 [[ $do_dryrun == true ]] && RSYNC_DRY=(--dry-run)
+RSYNC_EXCLUDES=()
+for dir in "${ignore_dirs[@]}"; do
+  RSYNC_EXCLUDES+=("--exclude=$dir/")
+done
 
 # Ensure UTF-8 locale so non-ASCII filenames are handled predictably
 export LANG=${LANG:-en_US.UTF-8}
@@ -330,10 +448,11 @@ refresh_inventory() {
   # -z sets the delimiter to \0 because it can't be contained in a file name
   mapfile -d '' tracked_files < <(git -C "$local_vault_path" ls-files -z)
 
+  local remote_find_files_cmd
+  remote_find_files_cmd=$(make_remote_find_command "f")
   # Remote inventories gathered with C locale to avoid locale-specific comparisons
   mapfile -d '' remote_files < <(
-    ssh "$remote_host" "cd $remote_dir_shell && \
-      LC_ALL=C find . -type f ! -path '*/.git/*' ! -path '*/.obsidian/*' ! -path '*/.trash/*' -print0 2>/dev/null"
+    ssh "$remote_host" "cd $remote_dir_shell && $remote_find_files_cmd"
   )
 
   # Trim leading ./ added by find
@@ -341,26 +460,31 @@ refresh_inventory() {
     remote_files[$idx]="${remote_files[$idx]#./}"
   done
 
+  local remote_find_dirs_cmd
+  remote_find_dirs_cmd=$(make_remote_find_command "d")
   # Mirror remote directory inventory so we can prune empty folders later
   mapfile -d '' remote_dirs < <(
-    ssh "$remote_host" "cd $remote_dir_shell && \
-      LC_ALL=C find . -type d ! -path '*/.git*' ! -path '*/.obsidian*' ! -path '*/.trash*' -print0 2>/dev/null"
+    ssh "$remote_host" "cd $remote_dir_shell && $remote_find_dirs_cmd"
   )
 
   for idx in "${!remote_dirs[@]}"; do
     remote_dirs[$idx]="${remote_dirs[$idx]#./}"
   done
 
+  local -a local_find_dir_args
+  make_find_args "d" local_find_dir_args
   # Same survey locally; using C locale keeps byte-order stable prior to normalization
   mapfile -d '' local_dirs < <(
     cd "$local_vault_path" && \
-    LC_ALL=C find . -type d ! -path '*/.git*' ! -path '*/.obsidian*' ! -path '*/.trash*' -print0 2>/dev/null
+    LC_ALL=C find "${local_find_dir_args[@]}" 2>/dev/null
   )
 
+  local -a local_find_file_args
+  make_find_args "f" local_find_file_args
   # Capture local files directly (not just tracked ones) so pruning honours attachments, etc.
   mapfile -d '' local_files < <(
     cd "$local_vault_path" && \
-    LC_ALL=C find . -type f ! -path '*/.git/*' ! -path '*/.obsidian/*' ! -path '*/.trash/*' -print0 2>/dev/null
+    LC_ALL=C find "${local_find_file_args[@]}" 2>/dev/null
   )
 
   for idx in "${!local_dirs[@]}"; do
@@ -477,8 +601,16 @@ for b in data:
 }
 
 should_skip_path() {
-  local path="$1"
-  [[ "$path" =~ (^|/)\.(git|obsidian|trash)(/|$) ]]
+  local path="${1#./}"
+  local ignore
+  for ignore in "${ignore_dirs[@]}"; do
+    local normalized="${ignore%/}"
+    [[ -z "$normalized" ]] && continue
+    if [[ "/$path/" == *"/$normalized/"* ]]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 # Ensure remote/local deletions settle before we run the bidirectional sync
@@ -777,11 +909,11 @@ fi
 # ----------------- Updates both ways -----------------
 
 run_tracked_rsync -rltivPh "${RSYNC_DRY[@]}" --update \
-  --exclude=".git/" --exclude=".obsidian/" --exclude=".trash/" \
+  "${RSYNC_EXCLUDES[@]}" \
   "$local_src" "$remote_rsync_dir"
 
 run_tracked_rsync -rltivPh "${RSYNC_DRY[@]}" --update \
-  --exclude=".git/" --exclude=".obsidian/" --exclude=".trash/" \
+  "${RSYNC_EXCLUDES[@]}" \
   "$remote_rsync_dir" "$local_src"
 
 # Update inventories post-sync so the ledger reflects the settled state
