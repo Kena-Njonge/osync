@@ -14,50 +14,50 @@ If you have used tools like Unison, this project will feel familiar, but the git
 
 ## How it works
 
-The primary entry point is `osync.sh`. Given a local vault path, a remote host, and a remote directory, it will:
+The primary entry point is `osync.sh`. Given a local directory path, a remote host, and a remote directory, it will:
 
 1. Validate that the local directory exists, the remote directory is reachable over SSH, and the local tree is a git repository.
 2. Load `.vault-directories`, which keeps the authoritative list of directories that should exist on both sides (or create it during seeding).
 3. Run `rsync` in both directions (dry-run by default) while keeping the directory ledger in sync.
-4. During a real run, clean up stale directories, stage the touched paths, and commit/push the result so the vault history follows the file transfers.
+4. During a real run, clean up stale directories, stage the touched paths, and commit/push the result so the directory history follows the file transfers.
 
 ## Requirements
 
 - Bash 5.x (uses associative arrays and `local -n` name references).
 - `rsync` 3.x or newer.
 - `ssh` with key-based access to the remote host.
-- `git`; the local vault must be a git repository so the script can stage, commit, and push updates.
+- `git`; the local directory must be a git repository so the script can stage, commit, and push updates.
 - `python3` is only needed when `SYNC_DEBUG=true` to pretty-print raw byte diagnostics.
 
 ## Usage
 
 ```
-./osync.sh <local_vault_path> <remote_host> <remote_directory> [--realrun] [--seed]
+./osync.sh <local_dir_path> <remote_host> <remote_directory> [--realrun] [--seed]
 ```
 
 - `--realrun` applies the rsync changes, prunes directories, and commits/pushes. Without it, the script performs a dry run and prints what would happen.
-- `--seed` bootstraps the `.vault-directories` ledger from the union of existing directories. Pair it with `--realrun` the first time you connect two vaults.
+- `--seed` bootstraps the `.vault-directories` ledger from the union of existing directories. Pair it with `--realrun` the first time you connect two directories.
 - Flags can appear in any order after the three required positional arguments.
 - `remote_host` should normally be an alias defined in your `~/.ssh/config` so authentication details stay out of the command line; a raw `user@hostname` string works too, but the alias keeps repeat runs tidy.
 
 ## Getting started
 
-1. Clone or copy this repository on the machine that hosts your local vault.
-2. Ensure the vault directory is a git repository (`git init` + initial commit if you are starting from scratch).
-3. Add the remote host to your SSH config (e.g., `~/.ssh/config`) and verify you can connect without prompts; make sure the target directory already exists.
+1. Clone or copy this repository on the machine that hosts your target local directory.
+2. Ensure the target directory is a git repository (`git init` + initial commit if you are starting from scratch).
+3. Add the remote host to your SSH config (e.g., `~/.ssh/config`) and verify you can connect without prompts; make sure the target remote directory already exists.
 4. Perform the first synchronization and seed the directory ledger:
 During this sync the history will be unified, meaning the resulting synced directory will include files and dirs from both dirs.
    ```bash
-   ./osync.sh /path/to/local/vault <host> /path/to/remote/vault --seed --realrun --ignore ... --ignore ...
+   ./osync.sh /path/to/local/dir <host> /path/to/remote/dir --seed --realrun --ignore ... --ignore ...
    ```
    Adjust the host and remote path to match your environment.
 5. For day-to-day syncs, run a quick dry run to confirm the pending changes:
    ```bash
-   ./osync.sh /path/to/local/vault  <host> /path/to/remote/vault --ignore ... --ignore ...
+   ./osync.sh /path/to/local/dir  <host> /path/to/remote/dir --ignore ... --ignore ...
    ```
    Follow it with a real run when everything looks good:
    ```bash
-   ./osync.sh /path/to/local/vault  <host> /path/to/remote/vault --realrun  --ignore ... --ignore ...
+   ./osync.sh /path/to/local/dir  <host> /path/to/remote/dir --realrun  --ignore ... --ignore ...
    ```
 
 ## Roadmap
