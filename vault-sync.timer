@@ -3,8 +3,8 @@ Description=Timer for vault-sync.service
 Wants=vault-sync.service
 
 [Timer]
-OnBootSec=20s
-OnUnitActiveSec=30s
+OnBootSec=2s
+OnUnitActiveSec=2s
 Persistent=true
 Unit=vault-sync.service
 

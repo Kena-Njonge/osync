@@ -1,0 +1,5 @@
+.env
+*.log
+/vault.md
+/sync-debug.log
+/trash/
