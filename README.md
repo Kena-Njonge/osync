@@ -8,7 +8,7 @@
 - Leverages `rsync` under the hood for efficient, resumable transfers and archive-friendly behavior.
 - Tracks directories through a `.vault-directories` ledger and git integration, making version control straightforward.
 - Resolves conflicts in favor of the newest change to keep day-to-day usage friction free.
-- Supports UTF-8 filenames, allowing for emojis and non ASCII characters to be transfered without issue
+- Supports UTF-8 filenames, allowing for emojis and non ASCII characters to be transferred without issue
 
 If you have used tools like Unison, this project will feel familiar, but the git-native mindset and reliance on ubiquitous tooling make it easy to tweak for your own workflow.
 
@@ -62,7 +62,7 @@ During this sync the history will be unified, meaning the resulting synced direc
 
 ## Roadmap
 
-- Inclusion of ignore-file logic like .gitignore, possible unification to keep file and dir ignoring under .gitignore, this does not affect the .vault-directorits, which serves a different purporse.
+- Inclusion of ignore-file logic like .gitignore, possible unification to keep file and dir ignoring under .gitignore, this does not affect the .vault-directories, which serves a different purpose.
 - Full refactor to streamline the code structure and configuration story.
 - Potential support for non-SSH transports (open to feedback).
 - Friendlier surface area around the `.vault-directories` ledger and automation hooks.
