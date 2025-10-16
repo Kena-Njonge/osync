@@ -48,20 +48,21 @@ The primary entry point is `osync.sh`. Given a local vault path, a remote host, 
 4. Perform the first synchronization and seed the directory ledger:
 During this sync the history will be unified, meaning the resulting synced directory will include files and dirs from both dirs.
    ```bash
-   ./osync.sh /path/to/local/vault <host> /path/to/remote/vault --seed --realrun
+   ./osync.sh /path/to/local/vault <host> /path/to/remote/vault --seed --realrun --ignore ... --ignore ...
    ```
    Adjust the host and remote path to match your environment.
 5. For day-to-day syncs, run a quick dry run to confirm the pending changes:
    ```bash
-   ./osync.sh /path/to/local/vault  <host> /path/to/remote/vault
+   ./osync.sh /path/to/local/vault  <host> /path/to/remote/vault --ignore ... --ignore ...
    ```
    Follow it with a real run when everything looks good:
    ```bash
-   ./osync.sh /path/to/local/vault  <host> /path/to/remote/vault --realrun
+   ./osync.sh /path/to/local/vault  <host> /path/to/remote/vault --realrun  --ignore ... --ignore ...
    ```
 
 ## Roadmap
 
+- Inclusion of ignore-file logic like .gitignore, possible unification to keep file and dir ignoring under .gitignore, this does not affect the .vault-directorits, which serves a different purporse.
 - Full refactor to streamline the code structure and configuration story.
 - Potential support for non-SSH transports (open to feedback).
 - Friendlier surface area around the `.vault-directories` ledger and automation hooks.

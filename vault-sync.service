@@ -6,6 +6,6 @@ Type=oneshot
 # Creates runtime dir so we can flock
 RuntimeDirectory=vault-sync
 # Fail immediately if another run is in progress
-ExecStart=/usr/bin/flock -n %t/vault-sync/lock <PATH_TO_SCRIPT>  <PATH_TO_LOCAL_DIR(_THROUGH_WSL)> <HOST_CONFIG_PROFIL_NAME> <PATH_TO_HOST_DIR> --realrun
+ExecStart=/usr/bin/flock -n %t/vault-sync/lock <PATH_TO_SCRIPT>  <PATH_TO_LOCAL_DIR(_THROUGH_WSL)> <HOST_CONFIG_PROFIL_NAME> <PATH_TO_HOST_DIR> --realrun --ignore .obsidian --ignore .trash
 Restart=no
 
