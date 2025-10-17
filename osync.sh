@@ -22,6 +22,8 @@ collect_status_paths() {
     (( idx+=1 ))
     [[ -z "$entry" ]] && continue
 
+
+    # -z prints the paths on seperate lise if they are renamed, so we have to do that
     local path="$entry"
 
     if (( ${#entry} >= 3 )) && [[ "${entry:2:1}" == ' ' ]]; then
@@ -928,7 +930,8 @@ if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; t
       # Only stage what the run touched (initial status + deletions + rsync diffs)
       while IFS= read -r -d '' path; do
         [[ -z "$path" ]] && continue
-        git -C "$local_vault_path" add -- "$path"
+        # -A handles renames/deletions where the old path no longer exists on disk.
+        git -C "$local_vault_path" add -A -- "$path"
       done < <(printf '%s\0' "${!paths_to_stage[@]}")
     fi
 
