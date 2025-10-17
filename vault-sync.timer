@@ -5,7 +5,6 @@ Wants=vault-sync.service
 [Timer]
 OnBootSec=2s
 OnUnitActiveSec=2s
-Persistent=true
 Unit=vault-sync.service
 
 [Install]
