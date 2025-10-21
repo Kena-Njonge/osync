@@ -930,8 +930,14 @@ if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; t
       # Only stage what the run touched (initial status + deletions + rsync diffs)
       while IFS= read -r -d '' path; do
         [[ -z "$path" ]] && continue
-        # -A handles renames/deletions where the old path no longer exists on disk.
-        git -C "$local_vault_path" add -A -- "$path"
+        # Only stage paths that exist on disk or are still tracked; this avoids
+        # spurious pathspec errors once Git has already recorded the removal.
+        if [[ -e "$local_vault_path/$path" ]] || git -C "$local_vault_path" ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then
+          # -A handles renames/deletions where the old path no longer exists locally.
+          git -C "$local_vault_path" add -A -- "$path"
+        else
+          debug_log "skip staging for vanished path: $(printf '%q' "$path")"
+        fi
       done < <(printf '%s\0' "${!paths_to_stage[@]}")
     fi
 
