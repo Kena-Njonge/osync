@@ -930,6 +930,15 @@ if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; t
       # Only stage what the run touched (initial status + deletions + rsync diffs)
       while IFS= read -r -d '' path; do
         [[ -z "$path" ]] && continue
+        # Check if the path is ignored
+        if git -C "$local_vault_path" check-ignore -q -- "$path"; then
+          # If the file is still tracked, untrack it 
+          if git -C "$local_vault_path" ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then
+            git -C "$local_vault_path" rm --cached -- "$path" >/dev/null 2>&1 || true
+          fi
+          echo "Skipping gitignored path: $path"
+          continue
+        fi
         # Only stage paths that exist on disk or are still tracked; this avoids
         # spurious pathspec errors once Git has already recorded the removal.
         if [[ -e "$local_vault_path/$path" ]] || git -C "$local_vault_path" ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then
@@ -939,6 +948,17 @@ if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; t
           debug_log "skip staging for vanished path: $(printf '%q' "$path")"
         fi
       done < <(printf '%s\0' "${!paths_to_stage[@]}")
+    fi
+
+    # Remove files that were ignored but not changed
+    # Also include global ignore config and exclude ignores
+    mapfile -d '' tracked_gitignored < <(git -C "$local_vault_path" ls-files -ci --exclude-standard -z || printf '')
+    if (( ${#tracked_gitignored[@]} > 0 )); then
+      echo "Cleaning tracked gitignored paths (${#tracked_gitignored[@]})"
+      for ignored_path in "${tracked_gitignored[@]}"; do
+        [[ -z "$ignored_path" ]] && continue
+        git -C "$local_vault_path" rm --cached -- "$ignored_path" >/dev/null 2>&1 || true
+      done
     fi
 
     mapfile -d '' remaining_status < <(git -C "$local_vault_path" status --porcelain -z)
