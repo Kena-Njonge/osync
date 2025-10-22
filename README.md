@@ -12,6 +12,8 @@
 
 If you have used tools like Unison, this project will feel familiar, but the git-native mindset and reliance on ubiquitous tooling make it easy to tweak for your own workflow.
 
+Osync is an independent project; it is neither affiliated with nor endorsed by Obsidian.
+
 ## How it works
 
 The primary entry point is `osync.sh`. Given a local directory path, a remote host, and a remote directory, it will:
@@ -40,6 +42,10 @@ The primary entry point is `osync.sh`. Given a local directory path, a remote ho
 - Flags can appear in any order after the three required positional arguments.
 - `remote_host` should normally be an alias defined in your `~/.ssh/config` so authentication details stay out of the command line; a raw `user@hostname` string works too, but the alias keeps repeat runs tidy.
 
+Notes on ignores:
+- `--ignore DIR` accepts directory paths only. Anything under that directory stays out of rsync, the deletion passes, and git staging.
+- `.gitignore` affects git status as usual but does not stop osync from transferring files; ignored files continue to sync unless their parent directories are excluded with `--ignore`.
+
 ## Getting started
 
 1. Clone or copy this repository on the machine that hosts your target local directory.
@@ -62,8 +68,7 @@ During this sync the history will be unified, meaning the resulting synced direc
 
 ## Roadmap
 
-- Inclusion of ignore-file logic like .gitignore, possible unification to keep file and dir ignoring under .gitignore, this does not affect the .vault-directories, which serves a different purpose.
-- Full refactor to streamline the code structure and configuration story.
+- Unification of exclusion logic under one file, default being to fully ignore, but also option to ignore only on transfer(--ignore currently) or only on backup (.gitignore currently).
 - Potential support for non-SSH transports (open to feedback).
 - Friendlier surface area around the `.vault-directories` ledger and automation hooks.
 
