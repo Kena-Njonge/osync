@@ -456,6 +456,11 @@ refresh_inventory() {
   mapfile -d '' remote_files < <(
     ssh "$remote_host" "cd $remote_dir_shell && $remote_find_files_cmd"
   )
+  local remote_files_status=${PIPESTATUS[0]:-0}
+  if (( remote_files_status != 0 )); then
+    echo "Failed to list remote files from $remote_host (exit $remote_files_status); aborting to avoid destructive pruning." >&2
+    return 75
+  fi
 
   # Trim leading ./ added by find
   for idx in "${!remote_files[@]}"; do
@@ -468,6 +473,11 @@ refresh_inventory() {
   mapfile -d '' remote_dirs < <(
     ssh "$remote_host" "cd $remote_dir_shell && $remote_find_dirs_cmd"
   )
+  local remote_dirs_status=${PIPESTATUS[0]:-0}
+  if (( remote_dirs_status != 0 )); then
+    echo "Failed to list remote directories from $remote_host (exit $remote_dirs_status); aborting to avoid destructive pruning." >&2
+    return 75
+  fi
 
   for idx in "${!remote_dirs[@]}"; do
     remote_dirs[$idx]="${remote_dirs[$idx]#./}"
