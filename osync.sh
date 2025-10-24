@@ -9,7 +9,20 @@ set -euo pipefail
 collect_status_paths() {
   local -n _dest="$1"
   local raw_entries=()
-  mapfile -d '' raw_entries < <(git -C "$local_vault_path" status --porcelain -z || printf '')
+  exec {git_status_fd}< <(git -C "$local_vault_path" status --porcelain -z)
+  local git_status_pid=$!
+  if ! mapfile -d '' -u "$git_status_fd" raw_entries; then
+    exec {git_status_fd}<&-
+    wait "$git_status_pid" || true
+    echo "Failed to read git status for $local_vault_path" >&2
+    return 75
+  fi
+  exec {git_status_fd}<&-
+  if ! wait "$git_status_pid"; then
+    local rc=$?
+    echo "Failed to read git status for $local_vault_path (exit $rc)" >&2
+    return 75
+  fi
 
   _dest=()
   local -A seen=()
@@ -324,7 +337,15 @@ build_directory_snapshot() {
   fi
 
   # Map to array and remove trailing delim
-  mapfile -t _out < <(printf '%s\n' "${!seen[@]}" | LC_ALL=C sort)
+  local snapshot_tmp
+  snapshot_tmp="$(mktemp)"
+  if ! printf '%s\n' "${!seen[@]}" | LC_ALL=C sort > "$snapshot_tmp"; then
+    rm -f "$snapshot_tmp"
+    echo "Failed to build directory snapshot" >&2
+    return 75
+  fi
+  mapfile -t _out < "$snapshot_tmp"
+  rm -f "$snapshot_tmp"
 }
 
 # Load the existing ledger into memory for fast membership checks during pruning.
@@ -448,17 +469,37 @@ finalize_ledger_state() {
 refresh_inventory() {
   # Collect tracked paths relative to repo root (NUL-delimited to preserve bytes)
   # -z sets the delimiter to \0 because it can't be contained in a file name
-  mapfile -d '' tracked_files < <(git -C "$local_vault_path" ls-files -z)
+  exec {tracked_fd}< <(git -C "$local_vault_path" ls-files -z)
+  local tracked_pid=$!
+  if ! mapfile -d '' -u "$tracked_fd" tracked_files; then
+    exec {tracked_fd}<&-
+    wait "$tracked_pid" || true
+    echo "Failed to list tracked files for $local_vault_path" >&2
+    return 75
+  fi
+  exec {tracked_fd}<&-
+  if ! wait "$tracked_pid"; then
+    local rc=$?
+    echo "Failed to list tracked files for $local_vault_path (exit $rc)" >&2
+    return 75
+  fi
 
   local remote_find_files_cmd
   remote_find_files_cmd=$(make_remote_find_command "f")
+  exec {remote_fd}< <(ssh "$remote_host" "cd $remote_dir_shell && $remote_find_files_cmd")
+  remote_pid=$!  # PID of the ssh/find process that’s feeding the FD
   # Remote inventories gathered with C locale to avoid locale-specific comparisons
-  mapfile -d '' remote_files < <(
-    ssh "$remote_host" "cd $remote_dir_shell && $remote_find_files_cmd"
-  )
-  local remote_files_status=${PIPESTATUS[0]:-0}
-  if (( remote_files_status != 0 )); then
-    echo "Failed to list remote files from $remote_host (exit $remote_files_status); aborting to avoid destructive pruning." >&2
+  if ! mapfile -d '' -u "$remote_fd" remote_files; then
+    exec {remote_fd}<&-
+    wait "$remote_pid" || true  # swallow to avoid “no child” errors
+    echo "Failed to read remote file list from $remote_host" >&2
+    return 75
+  fi
+
+  exec {remote_fd}<&-
+  if ! wait "$remote_pid"; then
+    local rc=$?
+    echo "Failed to list remote files from $remote_host (exit $rc)" >&2
     return 75
   fi
 
@@ -467,17 +508,24 @@ refresh_inventory() {
     remote_files[$idx]="${remote_files[$idx]#./}"
   done
 
-  local remote_find_dirs_cmd
   remote_find_dirs_cmd=$(make_remote_find_command "d")
-  # Mirror remote directory inventory so we can prune empty folders later
-  mapfile -d '' remote_dirs < <(
-    ssh "$remote_host" "cd $remote_dir_shell && $remote_find_dirs_cmd"
-  )
-  local remote_dirs_status=${PIPESTATUS[0]:-0}
-  if (( remote_dirs_status != 0 )); then
-    echo "Failed to list remote directories from $remote_host (exit $remote_dirs_status); aborting to avoid destructive pruning." >&2
+  exec {remote_fd}< <(ssh "$remote_host" "cd $remote_dir_shell && $remote_find_dirs_cmd")
+  remote_pid=$!  
+  if ! mapfile -d '' -u "$remote_fd" remote_dirs; then
+    exec {remote_fd}<&-
+    wait "$remote_pid" || true  # swallow to avoid “no child” errors
+    echo "Failed to read remote directory list from $remote_host" >&2
     return 75
   fi
+
+  exec {remote_fd}<&-
+  if ! wait "$remote_pid"; then
+    local rc=$?
+    echo "Failed to list remote directories from $remote_host (exit $rc)" >&2
+    return 75
+  fi
+
+  
 
   for idx in "${!remote_dirs[@]}"; do
     remote_dirs[$idx]="${remote_dirs[$idx]#./}"
@@ -486,18 +534,44 @@ refresh_inventory() {
   local -a local_find_dir_args
   make_find_args "d" local_find_dir_args
   # Same survey locally; using C locale keeps byte-order stable prior to normalization
-  mapfile -d '' local_dirs < <(
+  exec {local_dirs_fd}< <(
     cd "$local_vault_path" && \
     LC_ALL=C find "${local_find_dir_args[@]}" 2>/dev/null
   )
+  local local_dirs_pid=$!
+  if ! mapfile -d '' -u "$local_dirs_fd" local_dirs; then
+    exec {local_dirs_fd}<&-
+    wait "$local_dirs_pid" || true
+    echo "Failed to enumerate local directories under $local_vault_path" >&2
+    return 75
+  fi
+  exec {local_dirs_fd}<&-
+  if ! wait "$local_dirs_pid"; then
+    local rc=$?
+    echo "Failed to enumerate local directories under $local_vault_path (exit $rc)" >&2
+    return 75
+  fi
 
   local -a local_find_file_args
   make_find_args "f" local_find_file_args
   # Capture local files directly (not just tracked ones) so pruning honours attachments, etc.
-  mapfile -d '' local_files < <(
+  exec {local_files_fd}< <(
     cd "$local_vault_path" && \
     LC_ALL=C find "${local_find_file_args[@]}" 2>/dev/null
   )
+  local local_files_pid=$!
+  if ! mapfile -d '' -u "$local_files_fd" local_files; then
+    exec {local_files_fd}<&-
+    wait "$local_files_pid" || true
+    echo "Failed to enumerate local files under $local_vault_path" >&2
+    return 75
+  fi
+  exec {local_files_fd}<&-
+  if ! wait "$local_files_pid"; then
+    local rc=$?
+    echo "Failed to enumerate local files under $local_vault_path (exit $rc)" >&2
+    return 75
+  fi
 
   for idx in "${!local_dirs[@]}"; do
     local_dirs[$idx]="${local_dirs[$idx]#./}"
@@ -515,17 +589,26 @@ refresh_inventory() {
   [[ ${#_arr[@]} -eq 0 ]] && return 0
   
   local temp_result=()
-  mapfile -d '' temp_result < <(
-    printf '%s\0' "${_arr[@]}" |
-    python3 -c '
+  local norm_tmp
+  norm_tmp="$(mktemp)"
+  if ! printf '%s\0' "${_arr[@]}" | python3 -c '
 import sys, unicodedata
 data = sys.stdin.buffer.read().split(b"\0")
 for b in data:
     if not b: continue
     s = b.decode("utf-8","surrogatepass")
     print(unicodedata.normalize("NFC", s), end="\0")
-'
-  )
+' > "$norm_tmp"; then
+    rm -f "$norm_tmp"
+    echo "Failed to normalize filenames (python3 exited non-zero)" >&2
+    return 75
+  fi
+  if ! mapfile -d '' temp_result < "$norm_tmp"; then
+    rm -f "$norm_tmp"
+    echo "Failed to read normalized filenames" >&2
+    return 75
+  fi
+  rm -f "$norm_tmp"
   
   # Only update array if we got results
   if [[ ${#temp_result[@]} -gt 0 ]]; then
@@ -597,7 +680,20 @@ for b in data:
   # No need for local set, we just query the fs to see if it is there later on
 
 
-  mapfile -d '' deleted_files_local < <(git -C "$local_vault_path" ls-files --deleted -z)
+  exec {deleted_fd}< <(git -C "$local_vault_path" ls-files --deleted -z)
+  local deleted_pid=$!
+  if ! mapfile -d '' -u "$deleted_fd" deleted_files_local; then
+    exec {deleted_fd}<&-
+    wait "$deleted_pid" || true
+    echo "Failed to enumerate locally deleted files for $local_vault_path" >&2
+    return 75
+  fi
+  exec {deleted_fd}<&-
+  if ! wait "$deleted_pid"; then
+    local rc=$?
+    echo "Failed to enumerate locally deleted files for $local_vault_path (exit $rc)" >&2
+    return 75
+  fi
   normalize_array_nfc deleted_files_local
 
   deleted_files_remote=()
@@ -962,7 +1058,20 @@ if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; t
 
     # Remove files that were ignored but not changed
     # Also include global ignore config and exclude ignores
-    mapfile -d '' tracked_gitignored < <(git -C "$local_vault_path" ls-files -ci --exclude-standard -z || printf '')
+    exec {ignored_fd}< <(git -C "$local_vault_path" ls-files -ci --exclude-standard -z)
+    local ignored_pid=$!
+    if ! mapfile -d '' -u "$ignored_fd" tracked_gitignored; then
+      exec {ignored_fd}<&-
+      wait "$ignored_pid" || true
+      echo "Failed to enumerate tracked gitignored files for $local_vault_path" >&2
+      return 75
+    fi
+    exec {ignored_fd}<&-
+    if ! wait "$ignored_pid"; then
+      local rc=$?
+      echo "Failed to enumerate tracked gitignored files for $local_vault_path (exit $rc)" >&2
+      return 75
+    fi
     if (( ${#tracked_gitignored[@]} > 0 )); then
       echo "Cleaning tracked gitignored paths (${#tracked_gitignored[@]})"
       for ignored_path in "${tracked_gitignored[@]}"; do
@@ -971,7 +1080,20 @@ if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; t
       done
     fi
 
-    mapfile -d '' remaining_status < <(git -C "$local_vault_path" status --porcelain -z)
+    exec {status_fd}< <(git -C "$local_vault_path" status --porcelain -z)
+    local status_pid=$!
+    if ! mapfile -d '' -u "$status_fd" remaining_status; then
+      exec {status_fd}<&-
+      wait "$status_pid" || true
+      echo "Failed to refresh git status for $local_vault_path" >&2
+      return 75
+    fi
+    exec {status_fd}<&-
+    if ! wait "$status_pid"; then
+      local rc=$?
+      echo "Failed to refresh git status for $local_vault_path (exit $rc)" >&2
+      return 75
+    fi
     leftover=false
     # Warn if new worktree changes popped up mid-run; we still commit the staged subset.
     # If someone is editing while we are running, it is not horrible, but that edit
