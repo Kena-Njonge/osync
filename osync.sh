@@ -127,11 +127,10 @@ debug_dump_bytes() {
   local label="$1"
   local value="$2"
   local hex
-  hex=$(printf '%s' "$value" | python3 - <<'PY'
+hex=$(printf '%s' "$value" | python3 -c '
 import sys, binascii
 data = sys.stdin.buffer.read()
-sys.stdout.write(binascii.hexlify(data).decode('ascii'))
-PY
+sys.stdout.write(binascii.hexlify(data).decode("ascii"))'
 )
   debug_log "$label bytes: $hex"
 }
