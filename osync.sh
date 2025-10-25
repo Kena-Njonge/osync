@@ -4,6 +4,39 @@
 # Licensed under the MIT License. See LICENSE for details.
 set -euo pipefail
 
+current_timestamp() {
+  date +"%Y-%m-%d %H:%M:%S %z"
+}
+
+log_message() {
+  local level="$1"
+  shift || true
+  local ts message
+  ts="$(current_timestamp)"
+  message="$*"
+  case "$level" in
+    ERROR|WARN)
+    # Pritn to fd 2 i.e. stderr
+      printf '[%s] [%s] %s\n' "$ts" "$level" "$message" >&2
+      ;;
+    *)
+      printf '[%s] [%s] %s\n' "$ts" "$level" "$message"
+      ;;
+  esac
+}
+
+log_info() {
+  log_message INFO "$@"
+}
+
+log_warn() {
+  log_message WARN "$@"
+}
+
+log_error() {
+  log_message ERROR "$@"
+}
+
 # Capture the repo status ahead of the run so we know which paths were
 # already modified/added/deleted when the sync started.
 collect_status_paths() {
@@ -14,13 +47,13 @@ collect_status_paths() {
   if ! mapfile -d '' -u "$git_status_fd" raw_entries; then
     exec {git_status_fd}<&-
     wait "$git_status_pid" || true
-    echo "Failed to read git status for $local_vault_path" >&2
+    log_error "Failed to read git status for $local_vault_path"
     return 75
   fi
   exec {git_status_fd}<&-
   if ! wait "$git_status_pid"; then
     local rc=$?
-    echo "Failed to read git status for $local_vault_path (exit $rc)" >&2
+    log_error "Failed to read git status for $local_vault_path (exit $rc)"
     return 75
   fi
 
@@ -48,7 +81,8 @@ collect_status_paths() {
     fi
     [[ -n "$path" ]] && seen["$path"]=1
   done
-
+  
+  # Iterate over keys of associative array
   for path in "${!seen[@]}"; do
     _dest+=("$path")
   done
@@ -73,20 +107,18 @@ declare -A ignore_dir_set=()
 
 debug_enabled=${SYNC_DEBUG:-false}
 
-
-# Debugging functions
 debug_log() {
   [[ "$debug_enabled" != true ]] && return 0
-  printf '[DEBUG] %s\n' "$*"
+  log_message DEBUG "$@"
 }
 
 debug_dump_array() {
   [[ "$debug_enabled" != true ]] && return 0
   local -n _arr="$1"
   local label="$2"
-  printf '[DEBUG] %s (%d)\n' "$label" "${#_arr[@]}"
+  debug_log "$label (${#_arr[@]})"
   for item in "${_arr[@]}"; do
-    printf '         %s\n' "$item"
+    debug_log "         $item"
   done
 }
 
@@ -101,7 +133,7 @@ data = sys.stdin.buffer.read()
 sys.stdout.write(binascii.hexlify(data).decode('ascii'))
 PY
 )
-  printf '[DEBUG] %s bytes: %s\n' "$label" "$hex"
+  debug_log "$label bytes: $hex"
 }
 
 # Quote path correctly so that we don't expand ~ locally
@@ -126,7 +158,7 @@ add_ignore_dir() {
   local dir="$1"
 
   if [[ -z "$dir" ]]; then
-    echo "Ignore directory cannot be empty." >&2
+    log_error "Ignore directory cannot be empty."
     exit 1
   fi
 
@@ -137,21 +169,21 @@ add_ignore_dir() {
   dir="${dir%/}"
 
   if [[ -z "$dir" || "$dir" == "." ]]; then
-    echo "Ignore directory cannot reference the repository root." >&2
+    log_error "Ignore directory cannot reference the repository root."
     exit 1
   fi
   if [[ "$dir" == /* ]]; then
-    echo "Ignore directories must be relative to the directory of the script (no leading /): $dir" >&2
+    log_error "Ignore directories must be relative to the directory of the script (no leading /): $dir"
     exit 1
   fi
   if [[ "$dir" == *"../"* || "$dir" == ".." || "$dir" == "../" ]]; then
-    echo "Ignore directories cannot traverse upward: $dir" >&2
+    log_error "Ignore directories cannot traverse upward: $dir"
     exit 1
   fi
 
   # No need for globs, excluding a dir excludes everything underneath it also
   if [[ "$dir" == *"*"* || "$dir" == *"?"* || "$dir" == *"["* ]]; then
-    echo "Ignore directories cannot include glob characters: $dir" >&2
+    log_error "Ignore directories cannot include glob characters: $dir"
     exit 1
   fi
 
@@ -221,12 +253,12 @@ ledger_filename=".vault-directories"
 ledger_local_path=""
 declare -A ledger_prev_set=()
 
-echo "Arguments: $@"
+log_info "Arguments: $*"
 
 
 usage="Usage: $(basename "$0") <local_path> <remote_host> <remote_dir> [--realrun] [--seed] [--ignore DIR]..."
 if (( $# < 3 )); then
-  echo "$usage" >&2
+  log_error "$usage"
   exit 1
 fi
 
@@ -251,8 +283,8 @@ while (($#)); do
       ;;
     --ignore)
       if (( $# < 2 )); then
-        echo "--ignore requires a directory argument." >&2
-        echo "$usage" >&2
+        log_error "--ignore requires a directory argument."
+        log_error "$usage"
         exit 1
       fi
       add_ignore_dir "$2"
@@ -263,8 +295,8 @@ while (($#)); do
       shift
       ;;
     *)
-      echo "Unknown argument: $1" >&2
-      echo "$usage" >&2
+      log_error "Unknown argument: $1"
+      log_error "$usage"
       exit 1
       ;;
   esac
@@ -275,7 +307,7 @@ remote_vault_dir_path="${remote_vault_dir_path%/}/"
 
 # Validate local dir
 if [[ ! -d "$local_vault_path" ]]; then
-  echo "The provided path is not a directory. Please specify a valid path."
+  log_error "The provided path is not a directory. Please specify a valid path."
   exit 1
 fi
 
@@ -284,23 +316,27 @@ remote_rsync_dir="$remote_host:$(quote_remote_path "$remote_vault_dir_path")"
 
 # Validate remote dir
 if ssh -o BatchMode=yes -o ConnectTimeout=5 "$remote_host" "test -d $remote_dir_shell"; then
-  echo "Remote dir exists: $remote_host:$remote_vault_dir_path"
+  log_info "Remote dir exists: $remote_host:$remote_vault_dir_path"
 else
-  echo "Remote dir NOT found: $remote_host:$remote_vault_dir_path"
+  log_error "Remote dir NOT found: $remote_host:$remote_vault_dir_path"
   exit 1
 fi
 
 # Validate local dir is repository
 if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  echo "We are in a git repository, continuing"
+  log_info "We are in a git repository, continuing"
 else
-  echo "Please run this code in a git repository, see the tutorial"
+  log_error "Please run this code in a git repository, see the tutorial"
   exit 1
 fi
 # ------- DEBUGGIGN -------
-echo "Local:  $local_src"
-echo "Remote: $remote_host:$remote_vault_dir_path"
-echo "Mode:   $([[ $do_dryrun == true ]] && echo DRY-RUN || echo REAL RUN)"
+log_info "Local:  $local_src"
+log_info "Remote: $remote_host:$remote_vault_dir_path"
+current_mode="REAL RUN"
+if [[ $do_dryrun == true ]]; then
+  current_mode="DRY-RUN"
+fi
+log_info "Mode:   $current_mode"
 # ----------------
 
 
@@ -341,7 +377,7 @@ build_directory_snapshot() {
   snapshot_tmp="$(mktemp)"
   if ! printf '%s\n' "${!seen[@]}" | LC_ALL=C sort > "$snapshot_tmp"; then
     rm -f "$snapshot_tmp"
-    echo "Failed to build directory snapshot" >&2
+    log_error "Failed to build directory snapshot"
     return 75
   fi
   mapfile -t _out < "$snapshot_tmp"
@@ -386,7 +422,7 @@ ensure_ledger_ready() {
     local -a snapshot=()
     build_directory_snapshot snapshot
     if [[ $do_dryrun == true ]]; then
-      echo "DRY-RUN: ledger initialization skipped (${#snapshot[@]} directories detected)"
+      log_info "DRY-RUN: ledger initialization skipped (${#snapshot[@]} directories detected)"
       ledger_prev_set=()
       for dir in "${snapshot[@]}"; do
         ledger_prev_set["$dir"]=1
@@ -408,20 +444,20 @@ ensure_ledger_ready() {
   fi
 
   if [[ ! -f "$ledger_local_path" ]]; then
-    echo "Ledger file missing locally at $ledger_local_path. Run with --seed to initialize." >&2
+    log_error "Ledger file missing locally at $ledger_local_path. Run with --seed to initialize."
     exit 1
   fi
 
   local tmp
   tmp="$(mktemp)"
   if ! ssh "$remote_host" "cd $remote_dir_shell && cat '$ledger_filename'" > "$tmp"; then
-    echo "Ledger file missing remotely at ${remote_vault_dir_path}${ledger_filename}. Run with --seed to initialize." >&2
+    log_error "Ledger file missing remotely at ${remote_vault_dir_path}${ledger_filename}. Run with --seed to initialize."
     rm -f "$tmp"
     exit 1
   fi
 
   if ! cmp -s "$ledger_local_path" "$tmp"; then
-    echo "Ledger mismatch between local and remote .vault-directories; aborting to avoid divergence." >&2
+    log_error "Ledger mismatch between local and remote .vault-directories; aborting to avoid divergence."
     rm -f "$tmp"
     exit 1
   fi
@@ -449,7 +485,7 @@ finalize_ledger_state() {
   done
 
   if [[ $do_dryrun == true ]]; then
-    echo "DRY-RUN: ledger would record ${#snapshot[@]} directories"
+    log_info "DRY-RUN: ledger would record ${#snapshot[@]} directories"
     push_ledger_to_remote "$tmp"
     rm -f "$tmp"
     return
@@ -474,13 +510,13 @@ refresh_inventory() {
   if ! mapfile -d '' -u "$tracked_fd" tracked_files; then
     exec {tracked_fd}<&-
     wait "$tracked_pid" || true
-    echo "Failed to list tracked files for $local_vault_path" >&2
+    log_error "Failed to list tracked files for $local_vault_path"
     return 75
   fi
   exec {tracked_fd}<&-
   if ! wait "$tracked_pid"; then
     local rc=$?
-    echo "Failed to list tracked files for $local_vault_path (exit $rc)" >&2
+    log_error "Failed to list tracked files for $local_vault_path (exit $rc)"
     return 75
   fi
 
@@ -492,14 +528,14 @@ refresh_inventory() {
   if ! mapfile -d '' -u "$remote_fd" remote_files; then
     exec {remote_fd}<&-
     wait "$remote_pid" || true  # swallow to avoid “no child” errors
-    echo "Failed to read remote file list from $remote_host" >&2
+    log_error "Failed to read remote file list from $remote_host"
     return 75
   fi
 
   exec {remote_fd}<&-
   if ! wait "$remote_pid"; then
     local rc=$?
-    echo "Failed to list remote files from $remote_host (exit $rc)" >&2
+    log_error "Failed to list remote files from $remote_host (exit $rc)"
     return 75
   fi
 
@@ -514,14 +550,14 @@ refresh_inventory() {
   if ! mapfile -d '' -u "$remote_fd" remote_dirs; then
     exec {remote_fd}<&-
     wait "$remote_pid" || true  # swallow to avoid “no child” errors
-    echo "Failed to read remote directory list from $remote_host" >&2
+    log_error "Failed to read remote directory list from $remote_host"
     return 75
   fi
 
   exec {remote_fd}<&-
   if ! wait "$remote_pid"; then
     local rc=$?
-    echo "Failed to list remote directories from $remote_host (exit $rc)" >&2
+    log_error "Failed to list remote directories from $remote_host (exit $rc)"
     return 75
   fi
 
@@ -542,13 +578,13 @@ refresh_inventory() {
   if ! mapfile -d '' -u "$local_dirs_fd" local_dirs; then
     exec {local_dirs_fd}<&-
     wait "$local_dirs_pid" || true
-    echo "Failed to enumerate local directories under $local_vault_path" >&2
+    log_error "Failed to enumerate local directories under $local_vault_path"
     return 75
   fi
   exec {local_dirs_fd}<&-
   if ! wait "$local_dirs_pid"; then
     local rc=$?
-    echo "Failed to enumerate local directories under $local_vault_path (exit $rc)" >&2
+    log_error "Failed to enumerate local directories under $local_vault_path (exit $rc)"
     return 75
   fi
 
@@ -563,13 +599,13 @@ refresh_inventory() {
   if ! mapfile -d '' -u "$local_files_fd" local_files; then
     exec {local_files_fd}<&-
     wait "$local_files_pid" || true
-    echo "Failed to enumerate local files under $local_vault_path" >&2
+    log_error "Failed to enumerate local files under $local_vault_path"
     return 75
   fi
   exec {local_files_fd}<&-
   if ! wait "$local_files_pid"; then
     local rc=$?
-    echo "Failed to enumerate local files under $local_vault_path (exit $rc)" >&2
+    log_error "Failed to enumerate local files under $local_vault_path (exit $rc)"
     return 75
   fi
 
@@ -600,12 +636,12 @@ for b in data:
     print(unicodedata.normalize("NFC", s), end="\0")
 ' > "$norm_tmp"; then
     rm -f "$norm_tmp"
-    echo "Failed to normalize filenames (python3 exited non-zero)" >&2
+    log_error "Failed to normalize filenames (python3 exited non-zero)"
     return 75
   fi
   if ! mapfile -d '' temp_result < "$norm_tmp"; then
     rm -f "$norm_tmp"
-    echo "Failed to read normalized filenames" >&2
+    log_error "Failed to read normalized filenames"
     return 75
   fi
   rm -f "$norm_tmp"
@@ -685,13 +721,13 @@ for b in data:
   if ! mapfile -d '' -u "$deleted_fd" deleted_files_local; then
     exec {deleted_fd}<&-
     wait "$deleted_pid" || true
-    echo "Failed to enumerate locally deleted files for $local_vault_path" >&2
+    log_error "Failed to enumerate locally deleted files for $local_vault_path"
     return 75
   fi
   exec {deleted_fd}<&-
   if ! wait "$deleted_pid"; then
     local rc=$?
-    echo "Failed to enumerate locally deleted files for $local_vault_path (exit $rc)" >&2
+    log_error "Failed to enumerate locally deleted files for $local_vault_path (exit $rc)"
     return 75
   fi
   normalize_array_nfc deleted_files_local
@@ -815,19 +851,19 @@ reconcile_deletions() {
 
     if (( ${#remote_delete_files[@]} == 0 && ${#remote_dirs_to_prune[@]} == 0 && ${#local_delete_files[@]} == 0 && ${#local_dirs_to_prune[@]} == 0 )); then
       if (( iteration == 1 )); then
-        echo ">>> No files to delete on remote <<<"
-        echo ">>> No directories to prune on remote <<<"
-        echo ">>> No files to delete locally <<<"
-        echo ">>> No directories to prune locally <<<"
+        log_info ">>> No files to delete on remote <<<"
+        log_info ">>> No directories to prune on remote <<<"
+        log_info ">>> No files to delete locally <<<"
+        log_info ">>> No directories to prune locally <<<"
         summary_printed=true
       fi
       break
     fi
 
-    echo "Deletion pass #$iteration"
+    log_info "Deletion pass #$iteration"
 
     if (( ${#remote_delete_files[@]} > 0 )); then
-      echo ">>> Remote deletions queued (${#remote_delete_files[@]}) <<<"
+      log_info ">>> Remote deletions queued (${#remote_delete_files[@]}) <<<"
       remote_file_actions=$((remote_file_actions + ${#remote_delete_files[@]}))
       printf '%s\n' "${remote_delete_files[@]}" | head -n 10
       for path in "${remote_delete_files[@]}"; do
@@ -836,9 +872,9 @@ reconcile_deletions() {
         fi
       done
       if [[ $do_dryrun == true ]]; then
-        echo "DRY-RUN: skipping remote deletions"
+        log_info "DRY-RUN: skipping remote deletions"
       else
-        echo "[remote] deleting files:"
+        log_info "[remote] deleting files:"
         printf '%s\n' "${remote_delete_files[@]}"
         printf '%s\0' "${remote_delete_files[@]}" | \
           ssh "$remote_host" "cd $remote_dir_shell && xargs -0 rm -f --"
@@ -846,13 +882,13 @@ reconcile_deletions() {
     fi
 
     if (( ${#remote_dirs_to_prune[@]} > 0 )); then
-      echo "Remote directories to prune (${#remote_dirs_to_prune[@]}):"
+      log_info "Remote directories to prune (${#remote_dirs_to_prune[@]}):"
       remote_dir_actions=$((remote_dir_actions + ${#remote_dirs_to_prune[@]}))
       printf '%s\n' "${remote_dirs_to_prune[@]}" | head -n 10
       if [[ $do_dryrun == true ]]; then
-        echo "DRY-RUN: skipping remote directory pruning"
+        log_info "DRY-RUN: skipping remote directory pruning"
       else
-        echo "[remote] pruning directories:"
+        log_info "[remote] pruning directories:"
         printf '%s\n' "${remote_dirs_to_prune[@]}"
         printf '%s\0' "${remote_dirs_to_prune[@]}" | \
           ssh "$remote_host" "cd $remote_dir_shell && while IFS= read -r -d '' dir; do [ -z \"\$dir\" ] && continue; rmdir -- \"\$dir\" 2>/dev/null || true; done"
@@ -860,7 +896,7 @@ reconcile_deletions() {
     fi
 
     if (( ${#local_delete_files[@]} > 0 )); then
-      echo ">>> Local deletions queued (${#local_delete_files[@]}) <<<"
+      log_info ">>> Local deletions queued (${#local_delete_files[@]}) <<<"
       local_file_actions=$((local_file_actions + ${#local_delete_files[@]}))
       printf '%s\n' "${local_delete_files[@]}" | head -n 10
       for path in "${local_delete_files[@]}"; do
@@ -869,34 +905,34 @@ reconcile_deletions() {
         fi
       done
       if [[ $do_dryrun == true ]]; then
-        echo "DRY-RUN: skipping local deletions"
+        log_info "DRY-RUN: skipping local deletions"
       else
-        echo "[local] deleting files:"
+        log_info "[local] deleting files:"
         printf '%s\n' "${local_delete_files[@]}"
         for f in "${local_delete_files[@]}"; do
-          rm -f -- "$local_vault_path/$f" || echo "[warn] failed to delete $f"
+          rm -f -- "$local_vault_path/$f" || log_warn "failed to delete $f"
         done
       fi
     fi
 
     if (( ${#local_dirs_to_prune[@]} > 0 )); then
-      echo "Local directories to prune (${#local_dirs_to_prune[@]}):"
+      log_info "Local directories to prune (${#local_dirs_to_prune[@]}):"
       local_dir_actions=$((local_dir_actions + ${#local_dirs_to_prune[@]}))
       printf '%s\n' "${local_dirs_to_prune[@]}" | head -n 10
       if [[ $do_dryrun == true ]]; then
-        echo "DRY-RUN: skipping local directory pruning"
+        log_info "DRY-RUN: skipping local directory pruning"
       else
-        echo "[local] pruning directories:"
+        log_info "[local] pruning directories:"
         printf '%s\n' "${local_dirs_to_prune[@]}"
         for dir in "${local_dirs_to_prune[@]}"; do
           [[ -z "$dir" ]] && continue
-          rmdir -- "$local_vault_path/$dir" 2>/dev/null || echo "[warn] failed to prune directory $dir"
+          rmdir -- "$local_vault_path/$dir" 2>/dev/null || log_warn "failed to prune directory $dir"
         done
       fi
     fi
 
     if [[ $do_dryrun == true ]]; then
-      echo "DRY-RUN: stopping deletion reconciliation after simulated pass (tree unchanged)."
+      log_info "DRY-RUN: stopping deletion reconciliation after simulated pass (tree unchanged)."
       break
     fi
 
@@ -905,16 +941,16 @@ reconcile_deletions() {
 
   if [[ $summary_printed == false ]]; then
     if (( remote_file_actions == 0 )); then
-      echo ">>> No files to delete on remote <<<"
+      log_info ">>> No files to delete on remote <<<"
     fi
     if (( remote_dir_actions == 0 )); then
-      echo ">>> No directories to prune on remote <<<"
+      log_info ">>> No directories to prune on remote <<<"
     fi
     if (( local_file_actions == 0 )); then
-      echo ">>> No files to delete locally <<<"
+      log_info ">>> No files to delete locally <<<"
     fi
     if (( local_dir_actions == 0 )); then
-      echo ">>> No directories to prune locally <<<"
+      log_info ">>> No directories to prune locally <<<"
     fi
   fi
 }
@@ -967,26 +1003,26 @@ run_tracked_rsync() {
   return $rsync_exit
 }
 
-echo "Testing remote find command..."
+log_info "Testing remote find command..."
 ssh "$remote_host" "cd $remote_dir_shell && pwd && ls -la | head -5"
 
 refresh_inventory
 
 ensure_ledger_ready
 
-echo "remote_files count: ${#remote_files[@]}"
-echo "tracked_files count: ${#tracked_files[@]}"
-echo "deleted_files_remote count: ${#deleted_files_remote[@]}"
-echo "deleted_files_remote: ${deleted_files_remote[@]}"
-echo "deleted_files_local count: ${#deleted_files_local[@]}"
-echo "deleted_files_local: ${deleted_files_local[@]}"
+log_info "remote_files count: ${#remote_files[@]}"
+log_info "tracked_files count: ${#tracked_files[@]}"
+log_info "deleted_files_remote count: ${#deleted_files_remote[@]}"
+log_info "deleted_files_remote: ${deleted_files_remote[@]}"
+log_info "deleted_files_local count: ${#deleted_files_local[@]}"
+log_info "deleted_files_local: ${deleted_files_local[@]}"
 
 
-echo "Seed: $seed"
+log_info "Seed: $seed"
 if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1 && [[ $seed == false ]]; then
-  echo "Starting deletion reconciliation"
+  log_info "Starting deletion reconciliation"
   if [[ $do_dryrun == true ]]; then
-    echo "NOTE: running in DRY-RUN mode; destructive operations are skipped"
+    log_info "NOTE: running in DRY-RUN mode; destructive operations are skipped"
   fi
 
   # Remember which paths were dirty before we touched anything, so staging stays scoped
@@ -1003,14 +1039,14 @@ if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1 &&
 
 elif git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1 && [[ $seed ]]; then 
 	# On seed, we have never transfered files, so we just want to transfer and set our status to 1
-	# We also don't worry about deletions.
-	# so we won't overwrite anything in the remote, they will be added as new in the next sync assuming they ahdn't been tracked yet
-	# We just continue, the script, do nothing here
+  # We also don't worry about deletions.
+  # so we won't overwrite anything in the remote, they will be added as new in the next sync assuming they ahdn't been tracked yet
+  # We just continue, the script, do nothing here
   # We also create the original dir list, otherwise we wouldn't be able to create or delete dirs lol
-  echo "We are in seed mode"
+  log_info "We are in seed mode"
 	:
 else
-  echo "Not a git repo at $local_vault_path; To avoid side effects and mistakes, the operation is aborted."
+  log_error "Not a git repo at $local_vault_path; To avoid side effects and mistakes, the operation is aborted."
   exit 1
 fi
 
@@ -1042,7 +1078,7 @@ if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; t
           if git -C "$local_vault_path" ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then
             git -C "$local_vault_path" rm --cached -- "$path" >/dev/null 2>&1 || true
           fi
-          echo "Skipping gitignored path: $path"
+          log_info "Skipping gitignored path: $path"
           continue
         fi
         # Only stage paths that exist on disk or are still tracked; this avoids
@@ -1063,17 +1099,17 @@ if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; t
     if ! mapfile -d '' -u "$ignored_fd" tracked_gitignored; then
       exec {ignored_fd}<&-
       wait "$ignored_pid" || true
-      echo "Failed to enumerate tracked gitignored files for $local_vault_path" >&2
+      log_error "Failed to enumerate tracked gitignored files for $local_vault_path"
       return 75
     fi
     exec {ignored_fd}<&-
     if ! wait "$ignored_pid"; then
       local rc=$?
-      echo "Failed to enumerate tracked gitignored files for $local_vault_path (exit $rc)" >&2
+      log_error "Failed to enumerate tracked gitignored files for $local_vault_path (exit $rc)"
       return 75
     fi
     if (( ${#tracked_gitignored[@]} > 0 )); then
-      echo "Cleaning tracked gitignored paths (${#tracked_gitignored[@]})"
+      log_info "Cleaning tracked gitignored paths (${#tracked_gitignored[@]})"
       for ignored_path in "${tracked_gitignored[@]}"; do
         [[ -z "$ignored_path" ]] && continue
         git -C "$local_vault_path" rm --cached -- "$ignored_path" >/dev/null 2>&1 || true
@@ -1085,13 +1121,13 @@ if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; t
     if ! mapfile -d '' -u "$status_fd" remaining_status; then
       exec {status_fd}<&-
       wait "$status_pid" || true
-      echo "Failed to refresh git status for $local_vault_path" >&2
+      log_error "Failed to refresh git status for $local_vault_path"
       return 75
     fi
     exec {status_fd}<&-
     if ! wait "$status_pid"; then
       local rc=$?
-      echo "Failed to refresh git status for $local_vault_path (exit $rc)" >&2
+      log_error "Failed to refresh git status for $local_vault_path (exit $rc)"
       return 75
     fi
     leftover=false
@@ -1113,19 +1149,19 @@ if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; t
     done
 
     if [[ $leftover == true ]]; then
-      echo "Warning: additional unstaged changes detected; committing staged paths only."
+      log_warn "Warning: additional unstaged changes detected; committing staged paths only."
     fi
 
     if ! git -C "$local_vault_path" diff --cached --quiet; then
       git -C "$local_vault_path" commit -m "Update at $(date +'%Y-%m-%d %H:%M:%S %z')"
       git -C "$local_vault_path" push
     else
-      echo "No changes to commit."
+      log_info "No changes to commit."
     fi
   else
-    echo "DRY-RUN: skipping git add/commit/push. Local status (what would change):"
+    log_info "DRY-RUN: skipping git add/commit/push. Local status (what would change):"
     git -C "$local_vault_path" status --porcelain || true
   fi
 else
-  echo "Not a git repo at $local_vault_path; skipping git steps."
+  log_warn "Not a git repo at $local_vault_path; skipping git steps."
 fi
