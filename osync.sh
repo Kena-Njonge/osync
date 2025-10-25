@@ -1059,7 +1059,7 @@ if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; t
     # Remove files that were ignored but not changed
     # Also include global ignore config and exclude ignores
     exec {ignored_fd}< <(git -C "$local_vault_path" ls-files -ci --exclude-standard -z)
-    local ignored_pid=$!
+    ignored_pid=$!
     if ! mapfile -d '' -u "$ignored_fd" tracked_gitignored; then
       exec {ignored_fd}<&-
       wait "$ignored_pid" || true
@@ -1081,7 +1081,7 @@ if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; t
     fi
 
     exec {status_fd}< <(git -C "$local_vault_path" status --porcelain -z)
-    local status_pid=$!
+    status_pid=$!
     if ! mapfile -d '' -u "$status_fd" remaining_status; then
       exec {status_fd}<&-
       wait "$status_pid" || true
