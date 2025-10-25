@@ -135,19 +135,22 @@ sys.stdout.write(binascii.hexlify(data).decode("ascii"))'
   debug_log "$label bytes: $hex"
 }
 
-# Quote path correctly so that we don't expand ~ locally
+# Escape remote path segments safely while preserving ~user semantics.
 quote_remote_path() {
   local path="$1"
   if [[ "$path" == ~* ]]; then
     local prefix rest
     prefix="${path%%/*}"
     rest="${path#"$prefix"}"
+    # Nothing beyond the ~user prefix; hand it back untouched so the remote shell expands it.
     if [[ "$rest" == "$path" ]]; then
       printf '%s' "$prefix"
       return
     fi
+    # Escape only the remainder so ~user still expands remotely.
     printf '%s%s' "$prefix" "$(printf '%q' "$rest")"
   else
+  # Fully escape arbitrary paths for reuse inside remote shell commands.
     printf '%q' "$path"
   fi
 }
