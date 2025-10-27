@@ -14,6 +14,8 @@ If you have used tools like Unison, this project will feel familiar, but the git
 
 Osync is an independent project; it is neither affiliated with nor endorsed by Obsidian.
 
+If you are interested in using osync to automatically sync your Obsidian vaults, check my [blog post](https://kenakiruri.substack.com/p/how-i-backup-and-sync-obsidian-between?r=n4xrv) and [YouTube Video](https://youtu.be/Bx4pdPT7Uyo?si=hXoWyK2INlXErXKi) guiding you through the setup.
+
 ## How it works
 
 The primary entry point is `osync.sh`. Given a local directory path, a remote host, and a remote directory, it will:
@@ -25,8 +27,8 @@ The primary entry point is `osync.sh`. Given a local directory path, a remote ho
 
 ## Requirements
 
-- Bash 5.x (uses associative arrays and `local -n` name references).
-- `rsync` 3.x or newer.
+- Bash 5.1 or newer (uses associative arrays and `local -n` name references).
+- `rsync` 3.1.3 or newer.
 - `ssh` with key-based access to the remote host.
 - `git`; the local directory must be a git repository so the script can stage, commit, and push updates.
 - `python3` is only needed when `SYNC_DEBUG=true` to pretty-print raw byte diagnostics.
@@ -65,7 +67,7 @@ During this sync the history will be unified, meaning the resulting synced direc
    ```bash
    ./osync.sh /path/to/local/dir  <host> /path/to/remote/dir --realrun  --ignore ... --ignore ...
    ```
-
+6. For automatic syncs, you can fill in the service template that is provided and reload and start the units, run the timer only after you have run the first synchronization and seeded.
 ## Roadmap
 
 - **Single ignore spec**  
