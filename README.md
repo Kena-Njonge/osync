@@ -68,16 +68,35 @@ During this sync the history will be unified, meaning the resulting synced direc
 
 ## Roadmap
 
-- Unification of exclusion logic under one file, default being to fully ignore, but also option to ignore only on transfer(--ignore currently) or only on backup (.gitignore currently).
-- Potential support for non-SSH transports (open to feedback).
-- Friendlier surface area around the `.vault-directories` ledger and automation hooks.
+- **Single ignore spec**  
+    Consolidate exclusion rules into one file (e.g., `.syncignore`) with three scopes:
+    
+    - `ignore = all` (default; skip for **backup and transfer**)
+        
+    - `ignore = transfer` (skip **only** on transfer)
+        
+    - `ignore = backup` (skip **only** on backup)  
+        CLI override: `--ignore-scope all|transfer|backup`. Back-compat: import from existing `.gitignore` and `--ignore` flags.
+        
+- **Simple versioning & conflict handling**  
+    When a **true conflict** is detected (both sides changed since common ancestor), don’t clobber:
+    
+    - Keep mainline with the chosen winner (configurable: `newest-wins` or `source-wins`).
+        
+    - Create a side branch at `conflict/<relpath>/<timestamp>` with the other version.
+        
+- **Automated LAN discovery for SSH**  
+    Automatically find peers on the same LAN and reconnect without prompts.
+    
+- **Additional transports (non-SSH)**  
+    Add pluggable transports behind a simple interface.
+
 
 ## Contributing
 
 Contributions are welcome! Please be aware:
 
 - This is a solo-maintained project and code reviews can take time—thanks in advance for your patience.
-- A sweeping refactor is on the horizon, so major changes might be held until that lands.
 - Prefer readable, self-describing code and include context in your pull requests about the problem you are solving.
 - Add tests or usage notes if you touch the sync behavior so it is easy to verify the change.
 
