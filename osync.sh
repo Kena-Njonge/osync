@@ -273,6 +273,8 @@ shift 3
 do_dryrun=true
 seed=false
 add_ignore_dir ".git"
+# Ensure rsync partial files are ignored/excluded on both sides
+add_ignore_dir ".rsync-partial"
 while (($#)); do
   case "$1" in
     --realrun)
@@ -330,6 +332,15 @@ if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; t
 else
   log_error "Please run this code in a git repository, see the tutorial"
   exit 1
+fi
+
+# Preflight: abort if any Git lock is present to avoid operating on a
+# half-written index or ref from a previous aborted run.
+if [[ -e "$local_vault_path/.git/index.lock" ]] || \
+   find "$local_vault_path/.git" -type f -name "*.lock" -print -quit | grep -q .; then
+  log_error "Detected Git lock file(s) under $local_vault_path/.git; aborting to avoid inconsistent state."
+  log_error "Please resolve the prior Git operation (or remove the lock if safe) and rerun."
+  exit 75
 fi
 # ------- DEBUGGIGN -------
 log_info "Local:  $local_src"
@@ -1054,11 +1065,11 @@ fi
 
 # ----------------- Updates both ways -----------------
 
-run_tracked_rsync -rltivPh "${RSYNC_DRY[@]}" --update \
+run_tracked_rsync -rltivPh "${RSYNC_DRY[@]}" --update --partial-dir=.rsync-partial --delay-updates \
   "${RSYNC_EXCLUDES[@]}" \
   "$local_src" "$remote_rsync_dir"
 
-run_tracked_rsync -rltivPh "${RSYNC_DRY[@]}" --update \
+run_tracked_rsync -rltivPh "${RSYNC_DRY[@]}" --update --partial-dir=.rsync-partial --delay-updates \
   "${RSYNC_EXCLUDES[@]}" \
   "$remote_rsync_dir" "$local_src"
 
@@ -1085,7 +1096,24 @@ if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; t
         fi
         # Only stage paths that exist on disk or are still tracked; this avoids
         # spurious pathspec errors once Git has already recorded the removal.
-        if [[ -e "$local_vault_path/$path" ]] || git -C "$local_vault_path" ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then
+        path_exists=false
+        if [[ -e "$local_vault_path/$path" ]]; then
+          path_exists=true
+        fi
+
+        path_tracked=false
+        if git -C "$local_vault_path" ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then
+          path_tracked=true
+        fi
+
+        if [[ $path_exists == true || $path_tracked == true ]]; then
+          # When the file is tracked and present locally, suppress whitespace-only churn.
+          if [[ $path_exists == true && $path_tracked == true ]]; then
+            if git -C "$local_vault_path" diff --ignore-all-space --quiet HEAD -- "$path"; then
+              debug_log "skip whitespace-only change: $(printf '%q' "$path")"
+              continue
+            fi
+          fi
           # -A handles renames/deletions where the old path no longer exists locally.
           git -C "$local_vault_path" add -A -- "$path"
         else
@@ -1144,7 +1172,16 @@ if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; t
       fi
       stage_char="${entry:0:1}"
       work_char="${entry:1:1}"
-      if [[ "$stage_char$work_char" == "??" || "$work_char" != ' ' ]]; then
+      path="${entry:3}"
+      if [[ "$stage_char$work_char" == "??" ]]; then
+        leftover=true
+        break
+      fi
+      if [[ "$work_char" != ' ' ]]; then
+        # Skip warning for whitespace-only edits that were intentionally left unstaged.
+        if [[ "$path" != *" -> "* ]] && git -C "$local_vault_path" diff --ignore-all-space --quiet HEAD -- "$path" 2>/dev/null; then
+          continue
+        fi
         leftover=true
         break
       fi
