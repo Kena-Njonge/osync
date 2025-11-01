@@ -336,6 +336,7 @@ fi
 
 # Preflight: abort if any Git lock is present to avoid operating on a
 # half-written index or ref from a previous aborted run.
+# Exist code 75 because the failure is temporary
 if [[ -e "$local_vault_path/.git/index.lock" ]] || \
    find "$local_vault_path/.git" -type f -name "*.lock" -print -quit | grep -q .; then
   log_error "Detected Git lock file(s) under $local_vault_path/.git; aborting to avoid inconsistent state."

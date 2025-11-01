@@ -42,6 +42,19 @@ run_sync() {
   "$SCRIPT" "$tmp_local" "$remote_host" "$tmp_remote" --realrun "$@" 
 }
 
+# Run sync and assert a specific exit status (bypasses set -e)
+run_sync_expect_status() {
+  local expected="$1"; shift
+  set +e
+  "$SCRIPT" "$tmp_local" "$remote_host" "$tmp_remote" --realrun "$@"
+  local rc=$?
+  set -e
+  if [[ "$rc" != "$expected" ]]; then
+    log "Error: expected exit $expected, got $rc"
+    exit 1
+  fi
+}
+
 # Run sync with a hard timeout to simulate interruption
 run_sync_timeout() {
   log "In timeout Function"
@@ -202,5 +215,13 @@ if command -v timeout >/dev/null 2>&1; then
     log "Size agreement after resumed rsync"  
   fi
 fi
+
+#
+# Preflight Git lock should abort the run with exit 75
+#
+log 'Test: preflight Git lock aborts with status 75'
+touch "$tmp_local/.git/index.lock"
+run_sync_expect_status 75
+rm -f "$tmp_local/.git/index.lock"
 
 log 'All tests passed'
