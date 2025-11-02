@@ -51,7 +51,7 @@ Notes on ignores:
 ### Safety options (env vars)
 
 - `SYNC_HOT_WINDOW` (seconds, default `3`): defers files whose mtime is within the last N seconds to avoid racing with editor save cycles (truncate-then-write or atomic replace). Set to `0` to disable if you prefer immediate syncing.
-- `SYNC_BACKUP` (`true`/`false`, default `true`): when `true`, keeps a local backup of any file that would be overwritten during the remote→local pass under `.osync-backups/<timestamp>/remote-to-local/` (this path is excluded from sync).
+- `SYNC_BACKUP` (`true`/`false`, default `false`): when `true`, keeps a local backup of any file that would be overwritten during the remote→local pass under `.osync-backups/<timestamp>/remote-to-local/` (this path is excluded from sync).
 - `SYNC_DEBUG` (`true`/`false`, default `false`): enables additional diagnostics during runs. Safe to leave on; increases logging verbosity.
 
 Example with systemd user service:
