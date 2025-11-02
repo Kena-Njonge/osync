@@ -314,7 +314,7 @@ done
 # Line-ending policy: create once, then one-time renormalize
 need_renorm=false
 
-if [ ! -f "$local_vault_path/.gitattributes" ]; then
+if [[ ! -f "$local_vault_path/.gitattributes" && $seed == true ]]; then
   cat > "$local_vault_path/.gitattributes" <<'EOF'
 * text=auto eol=lf
 # keep binaries quiet
@@ -330,7 +330,7 @@ else
   fi
 fi
 
-if [ "$need_renorm" = true && $seed = true]; then
+if [[ $need_renorm == true && $seed == true ]]; then
   git -C "$local_vault_path" add .gitattributes
   # One-time repo-wide normalization so future diffs don’t explode
   # We only renormalize in seed runs so that we don't blow up tracking.
@@ -343,7 +343,7 @@ fi
 git -C "$local_vault_path" config --local core.autocrlf input
 git -C "$local_vault_path" config --local core.safecrlf warn
 git -C "$local_vault_path" config --local merge.renormalize true
-git -C "$local_vault_path" config --local core.filemode false ;;
+git -C "$local_vault_path" config --local core.filemode false 
 
 
 local_src="${local_vault_path%/}/"
@@ -401,23 +401,13 @@ RSYNC_EXCLUDES=()
 for dir in "${ignore_dirs[@]}"; do
   RSYNC_EXCLUDES+=("--exclude=$dir/")
 done
+# Also keep repo-scoped config files local-only
+RSYNC_EXCLUDES+=("--exclude=.gitignore" "--exclude=.gitattributes")
 
 # Exclude files that changed very recently (to avoid racing with editors that
 # truncate-then-write). Configure with SYNC_HOT_WINDOW=<seconds> (0 disables). Default: 3s.
 hot_window_secs="${SYNC_HOT_WINDOW:-3}"
 RSYNC_DYNAMIC_EXCLUDES=()
-if [[ "$hot_window_secs" =~ ^[0-9]+$ ]] && (( hot_window_secs > 0 )); then
-  # Build a list of hot files relative to the vault root without changing cwd
-  # Use -newermt "-Xs" (GNU find) to select files modified within the last X seconds
-  while IFS= read -r -d '' rel; do
-    [[ -z "$rel" ]] && continue
-    # 'rel' is path relative to $local_vault_path due to %P
-    RSYNC_DYNAMIC_EXCLUDES+=( "--exclude=$rel" )
-  done < <(LC_ALL=C find "$local_vault_path" -type f -newermt "-${hot_window_secs} seconds" -printf '%P\0' 2>/dev/null)
-  if (( ${#RSYNC_DYNAMIC_EXCLUDES[@]} > 0 )); then
-    log_info "Deferring ${#RSYNC_DYNAMIC_EXCLUDES[@]} hot files (mtime < ${hot_window_secs}s) from this sync"
-  fi
-fi
 
 # Optional: keep local backups before remote→local overwrites.
 # Enable with SYNC_BACKUP=true. Backups live under .osync-backups/<timestamp>/remote-to-local/
@@ -816,6 +806,10 @@ for b in data:
 
   deleted_files_remote=()
   for p in "${tracked_files[@]}"; do
+    # Never treat repo metadata as "remote deletions"
+    if [[ "$p" == ".gitignore" || "$p" == ".gitattributes" ]]; then
+      continue
+    fi
     if [[ ! -v remote_set["$p"] ]] && [[ -f "$local_vault_path/$p" ]]; then
       deleted_files_remote+=("$p")
     fi
@@ -836,6 +830,10 @@ should_skip_path() {
       return 0
     fi
   done
+  # Skip common repo metadata files at the vault root
+  if [[ "$path" == ".gitignore" || "$path" == ".gitattributes" ]]; then
+    return 0
+  fi
   return 1
 }
 
@@ -1085,8 +1083,10 @@ run_tracked_rsync() {
   return $rsync_exit
 }
 
-log_info "Testing remote find command..."
-ssh "$remote_host" "cd $remote_dir_shell && pwd && ls -la | head -5"
+if [[ "$debug_enabled" == true ]]; then
+  log_info "Testing remote find command..."
+  ssh "$remote_host" "cd $remote_dir_shell && pwd && ls -la | head -5"
+fi
 
 refresh_inventory
 
@@ -1119,7 +1119,7 @@ if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1 &&
 
   reconcile_deletions
 
-elif git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1 && [[ $seed ]]; then 
+elif git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1 && [[ $seed == true ]]; then 
 	# On seed, we have never transfered files, so we just want to transfer and set our status to 1
   # We also don't worry about deletions.
   # so we won't overwrite anything in the remote, they will be added as new in the next sync assuming they ahdn't been tracked yet
@@ -1133,6 +1133,30 @@ else
 fi
 
 # ----------------- Updates both ways -----------------
+
+# Build dynamic hot-file excludes after inventories are ready so we can
+# avoid excluding brand-new, untracked local files from initial syncs.
+build_hot_window_excludes() {
+  RSYNC_DYNAMIC_EXCLUDES=()
+  if [[ "$hot_window_secs" =~ ^[0-9]+$ ]] && (( hot_window_secs > 0 )); then
+    local count=0
+    while IFS= read -r -d '' rel; do
+      [[ -z "$rel" ]] && continue
+      # Skip ignored paths and repo metadata files
+      if should_skip_path "$rel"; then
+        continue
+      fi
+      RSYNC_DYNAMIC_EXCLUDES+=( "--exclude=$rel" )
+      ((count+=1))
+    done < <(LC_ALL=C find "$local_vault_path" -type f -newermt "-${hot_window_secs} seconds" -printf '%P\0' 2>/dev/null)
+
+    if (( count > 0 )); then
+      log_info "Deferring ${count} hot files (mtime < ${hot_window_secs}s) from this sync"
+    fi
+  fi
+}
+
+build_hot_window_excludes
 
 run_tracked_rsync -rltivPh "${RSYNC_DRY[@]}" --update --partial-dir=.rsync-partial --delay-updates \
   "${RSYNC_EXCLUDES[@]}" "${RSYNC_DYNAMIC_EXCLUDES[@]}" \
