@@ -9,6 +9,92 @@ remote_host=${REMOTE_HOST:?Set REMOTE_HOST to an SSH profile}
 
 
 log() { printf '[test] %s\n' "$*"; }
+note() { printf '[test] Note: %s\n' "$*"; }
+
+# Assertion helpers with diagnostics
+fail() {
+  log "FAIL: $*"
+  exit 1
+}
+
+# Lightweight status checks (do not exit)
+check_file_exists_local() { [[ -f "$tmp_local/$1" ]]; }
+check_file_missing_local() { [[ ! -e "$tmp_local/$1" ]]; }
+check_file_exists_remote() { ssh "$remote_host" "test -f '$tmp_remote/$1'"; }
+check_file_missing_remote() { ssh "$remote_host" "test ! -e '$tmp_remote/$1'"; }
+
+show_local_context() {
+  local p="$1"
+  local parent
+  parent=$(dirname -- "$p")
+  log "Local root: $tmp_local"
+  log "Local ls -la of ./$parent"; ls -la "$tmp_local/$parent" 2>/dev/null || true
+  log "Local files (maxdepth=2):"; find "$tmp_local" -maxdepth 2 -type f -printf '%P\n' | sort | sed -n '1,100p' || true
+}
+
+show_remote_context() {
+  local p="$1"
+  local parent
+  parent=$(dirname -- "$p")
+  log "Remote root: $tmp_remote"
+  ssh "$remote_host" "cd '$tmp_remote' && echo '[remote] ls -la of ./$parent' && ls -la './$parent' 2>/dev/null || true"
+  ssh "$remote_host" "cd '$tmp_remote' && echo '[remote] files (maxdepth=2):' && find . -maxdepth 2 -type f -printf '%P\n' | sort | sed -n '1,100p'" || true
+}
+
+assert_file_exists_remote() {
+  local path="$1"
+  if ! check_file_exists_remote "$path"; then
+    log "Expected remote file to exist: $path"
+    show_remote_context "$path"
+    fail "remote file missing: $path"
+  fi
+}
+
+assert_file_missing_remote() {
+  local path="$1"
+  if ! check_file_missing_remote "$path"; then
+    log "Expected remote file to be absent: $path"
+    ssh "$remote_host" "stat -c 'size=%s mtime=%Y' '$tmp_remote/$path'" 2>/dev/null || true
+    show_remote_context "$path"
+    fail "remote file present: $path"
+  fi
+}
+
+assert_file_exists_local() {
+  local path="$1"
+  if ! check_file_exists_local "$path"; then
+    log "Expected local file to exist: $path"
+    show_local_context "$path"
+    fail "local file missing: $path"
+  fi
+}
+
+assert_file_missing_local() {
+  local path="$1"
+  if ! check_file_missing_local "$path"; then
+    log "Expected local file to be absent: $path"
+    stat -c 'size=%s mtime=%Y' "$tmp_local/$path" 2>/dev/null || true
+    show_local_context "$path"
+    fail "local file present: $path"
+  fi
+}
+
+assert_eq() {
+  local expected="$1" actual="$2" msg="$3"
+  if [[ "$expected" != "$actual" ]]; then
+    fail "$msg (expected='$expected' actual='$actual')"
+  fi
+}
+
+assert_gt() {
+  local a="$1" b="$2" msg="$3"
+  if ! [[ "$a" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ ]]; then
+    fail "$msg (non-numeric compare: a='$a' b='$b')"
+  fi
+  if (( a <= b )); then
+    fail "$msg (a='$a' b='$b')"
+  fi
+}
 
 if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "$remote_host" true >/dev/null 2>&1; then
   log "Skipping tests: unable to reach SSH host '$remote_host'"
@@ -39,7 +125,10 @@ git -C "$tmp_local" commit -q -m 'Initial'
 git -C "$tmp_local" push -q -u origin HEAD
 
 run_sync() {
-  "$SCRIPT" "$tmp_local" "$remote_host" "$tmp_remote" --realrun "$@" 
+  # Default runs ignore hot-window deferral to keep tests deterministic.
+  # Individual tests can override by setting SYNC_HOT_WINDOW before calling.
+  env SYNC_HOT_WINDOW="${SYNC_HOT_WINDOW:-0}" \
+    "$SCRIPT" "$tmp_local" "$remote_host" "$tmp_remote" --realrun "$@"
 }
 
 # Run sync and assert a specific exit status (bypasses set -e)
@@ -50,8 +139,7 @@ run_sync_expect_status() {
   local rc=$?
   set -e
   if [[ "$rc" != "$expected" ]]; then
-    log "Error: expected exit $expected, got $rc"
-    exit 1
+    fail "expected exit $expected, got $rc"
   fi
 }
 
@@ -77,21 +165,7 @@ remote_find_any() {
   ssh "$remote_host" "sh -c 'find '\''$tmp_remote'\'' -type f -path '\''$tmp_remote/$pattern'\'' -print -quit | grep -q .'"
 }
 
-assert_file_exists_remote() {
-  ssh "$remote_host" "test -f '$tmp_remote/$1'"
-}
-
-assert_file_missing_remote() {
-  ssh "$remote_host" "test ! -e '$tmp_remote/$1'"
-}
-
-assert_file_exists_local() {
-  [[ -f "$tmp_local/$1" ]]
-}
-
-assert_file_missing_local() {
-  [[ ! -e "$tmp_local/$1" ]]
-}
+## legacy assertion helpers (replaced above) removed
 
 file_size_local() {
   stat -c %s "$tmp_local/$1"
@@ -170,7 +244,7 @@ if command -v timeout >/dev/null 2>&1; then
   # Start sync and interrupt quickly
   run_sync_timeout 7
   # After interruption, canonical file should not be in place remotely yet
-  if assert_file_missing_remote "big_local.bin"; then
+  if check_file_missing_remote "big_local.bin"; then
     # A partial may exist under .rsync-partial (but not guaranteed if we aborted very early)
     if remote_find_any ".rsync-partial/big_local.bin*"; then
       log 'Remote partial exists (expected)'
@@ -195,7 +269,7 @@ if command -v timeout >/dev/null 2>&1; then
   ssh "$remote_host" "dd if=/dev/zero of='$tmp_remote/big_remote.bin' bs=1M count=200 status=none"
   expected_remote_size=$(file_size_remote big_remote.bin)
   run_sync_timeout 7
-  if assert_file_missing_local "big_remote.bin"; then
+  if check_file_missing_local "big_remote.bin"; then
     if [[ -d "$tmp_local/.rsync-partial" ]] && \
        find "$tmp_local/.rsync-partial" -type f -name 'big_remote.bin*' -print -quit | grep -q .; then
       log 'Local partial exists (expected)'
@@ -223,5 +297,35 @@ log 'Test: preflight Git lock aborts with status 75'
 touch "$tmp_local/.git/index.lock"
 run_sync_expect_status 75
 rm -f "$tmp_local/.git/index.lock"
+
+#
+# Hot-file exclusion window should defer syncing of a file modified very recently
+# and avoid overwriting a locally-hot file from the remote. After the window
+# elapses, the file should sync normally.
+#
+log 'Test: hot-file window defers newly-modified local file'
+# 1) Seed a file and propagate baseline
+printf 'BASE\n' > "$tmp_local/hot.txt"
+run_sync
+base_size_local=$(file_size_local hot.txt)
+base_size_remote=$(file_size_remote hot.txt)
+assert_eq "$base_size_local" "$base_size_remote" "baseline size mismatch before hot test"
+# 2) Modify locally and immediately sync with a hot window
+printf 'BASE-CHANGED-LONGER\n' > "$tmp_local/hot.txt"
+changed_size_local=$(file_size_local hot.txt)
+assert_gt "$changed_size_local" "$base_size_local" "changed file should be larger to detect deferral"
+SYNC_HOT_WINDOW=30
+SYNC_HOT_WINDOW=$SYNC_HOT_WINDOW run_sync
+# Remote should still have the baseline size (deferral), local should keep the new size
+post_size_remote=$(file_size_remote hot.txt)
+post_size_local=$(file_size_local hot.txt)
+assert_eq "$post_size_remote" "$base_size_remote" "remote changed despite hot-window deferral"
+assert_eq "$post_size_local" "$changed_size_local" "local content was overwritten during hot-window run"
+# 3) After the window elapses, the change should sync
+sleep $SYNC_HOT_WINDOW
+run_sync
+final_size_remote=$(file_size_remote hot.txt)
+assert_eq "$final_size_remote" "$changed_size_local" "remote did not receive update after hot window elapsed"
+
 
 log 'All tests passed'

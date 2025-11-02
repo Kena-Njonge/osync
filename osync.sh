@@ -155,7 +155,8 @@ quote_remote_path() {
   fi
 }
 
-# Add a Directory to the ignore set
+# Add a Directory to the ignore set (paths are interpreted
+# relative to the vault root, not the filesystem root)
 add_ignore_dir() {
   local dir="$1"
 
@@ -175,7 +176,7 @@ add_ignore_dir() {
     exit 1
   fi
   if [[ "$dir" == /* ]]; then
-    log_error "Ignore directories must be relative to the directory of the script (no leading /): $dir"
+    log_error "Ignore directories must be relative to the vault root (no leading /): $dir"
     exit 1
   fi
   if [[ "$dir" == *"../"* || "$dir" == ".." || "$dir" == "../" ]]; then
@@ -275,6 +276,8 @@ seed=false
 add_ignore_dir ".git"
 # Ensure rsync partial files are ignored/excluded on both sides
 add_ignore_dir ".rsync-partial"
+# Keep local safety backups out of sync if enabled
+add_ignore_dir ".osync-backups"
 while (($#)); do
   case "$1" in
     --realrun)
@@ -305,6 +308,43 @@ while (($#)); do
       ;;
   esac
 done
+
+
+
+# Line-ending policy: create once, then one-time renormalize
+need_renorm=false
+
+if [[ ! -f "$local_vault_path/.gitattributes" && $seed == true ]]; then
+  cat > "$local_vault_path/.gitattributes" <<'EOF'
+* text=auto eol=lf
+# keep binaries quiet
+*.png binary 
+*.jpg binary 
+*.gif binary
+EOF
+  need_renorm=true
+else
+  # If I later change the policy, trigger renorm again:
+  if ! git -C "$local_vault_path" diff --quiet -- ".gitattributes"; then
+    need_renorm=true
+  fi
+fi
+
+if [[ $need_renorm == true && $seed == true ]]; then
+  git -C "$local_vault_path" add .gitattributes
+  # One-time repo-wide normalization so future diffs don’t explode
+  # We only renormalize in seed runs so that we don't blow up tracking.
+  # So that they can be transfered, if we stage all they will never be transfered to remote and deletions will be repropagated
+  git -C "$local_vault_path" add --renormalize .
+  git -C "$local_vault_path" commit -m "Add/normalize line endings via .gitattributes" || true
+fi
+
+# Ensure repo-scoped settings (safe)
+git -C "$local_vault_path" config --local core.autocrlf input
+git -C "$local_vault_path" config --local core.safecrlf warn
+git -C "$local_vault_path" config --local merge.renormalize true
+git -C "$local_vault_path" config --local core.filemode false 
+
 
 local_src="${local_vault_path%/}/"
 remote_vault_dir_path="${remote_vault_dir_path%/}/"
@@ -361,6 +401,24 @@ RSYNC_EXCLUDES=()
 for dir in "${ignore_dirs[@]}"; do
   RSYNC_EXCLUDES+=("--exclude=$dir/")
 done
+# Also keep repo-scoped config files local-only
+RSYNC_EXCLUDES+=("--exclude=.gitignore" "--exclude=.gitattributes")
+
+# Exclude files that changed very recently (to avoid racing with editors that
+# truncate-then-write). Configure with SYNC_HOT_WINDOW=<seconds> (0 disables). Default: 3s.
+hot_window_secs="${SYNC_HOT_WINDOW:-3}"
+RSYNC_DYNAMIC_EXCLUDES=()
+
+# Optional: keep local backups before remote→local overwrites.
+# Enable with SYNC_BACKUP=true. Backups live under .osync-backups/<timestamp>/remote-to-local/
+backup_enabled=${SYNC_BACKUP:-true}
+RSYNC_BACKUP_REMOTE_TO_LOCAL=()
+if [[ "$backup_enabled" == true ]]; then
+  backup_stamp_dir="${local_vault_path%/}/.osync-backups"
+  mkdir -p "$backup_stamp_dir" || true
+  RSYNC_BACKUP_REMOTE_TO_LOCAL=( --backup --backup-dir="$backup_stamp_dir" )
+  log_info "Local backups enabled: $backup_stamp_dir"
+fi
 
 # Ensure UTF-8 locale so non-ASCII filenames are handled predictably
 export LANG=${LANG:-en_US.UTF-8}
@@ -748,6 +806,10 @@ for b in data:
 
   deleted_files_remote=()
   for p in "${tracked_files[@]}"; do
+    # Never treat repo metadata as "remote deletions"
+    if [[ "$p" == ".gitignore" || "$p" == ".gitattributes" ]]; then
+      continue
+    fi
     if [[ ! -v remote_set["$p"] ]] && [[ -f "$local_vault_path/$p" ]]; then
       deleted_files_remote+=("$p")
     fi
@@ -768,6 +830,10 @@ should_skip_path() {
       return 0
     fi
   done
+  # Skip common repo metadata files at the vault root
+  if [[ "$path" == ".gitignore" || "$path" == ".gitattributes" ]]; then
+    return 0
+  fi
   return 1
 }
 
@@ -1017,8 +1083,10 @@ run_tracked_rsync() {
   return $rsync_exit
 }
 
-log_info "Testing remote find command..."
-ssh "$remote_host" "cd $remote_dir_shell && pwd && ls -la | head -5"
+if [[ "$debug_enabled" == true ]]; then
+  log_info "Testing remote find command..."
+  ssh "$remote_host" "cd $remote_dir_shell && pwd && ls -la | head -5"
+fi
 
 refresh_inventory
 
@@ -1051,7 +1119,7 @@ if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1 &&
 
   reconcile_deletions
 
-elif git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1 && [[ $seed ]]; then 
+elif git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1 && [[ $seed == true ]]; then 
 	# On seed, we have never transfered files, so we just want to transfer and set our status to 1
   # We also don't worry about deletions.
   # so we won't overwrite anything in the remote, they will be added as new in the next sync assuming they ahdn't been tracked yet
@@ -1066,12 +1134,45 @@ fi
 
 # ----------------- Updates both ways -----------------
 
+# Build dynamic hot-file excludes after inventories are ready so we can
+# avoid excluding brand-new, untracked local files from initial syncs.
+build_hot_window_excludes() {
+  RSYNC_DYNAMIC_EXCLUDES=()
+  if [[ "$hot_window_secs" =~ ^[0-9]+$ ]] && (( hot_window_secs > 0 )); then
+    local count=0
+    exec {hot_fd}< <(LC_ALL=C find "$local_vault_path" -type f -newermt "-${hot_window_secs} seconds" -printf '%P\0' 2>/dev/null)
+    local hot_pid=$!
+    while IFS= read -r -d '' rel; do
+      [[ -z "$rel" ]] && continue
+      # Skip ignored paths and repo metadata files
+      if should_skip_path "$rel"; then
+        continue
+      fi
+      RSYNC_DYNAMIC_EXCLUDES+=( "--exclude=$rel" )
+      ((count+=1))
+    done <&"$hot_fd"
+    exec {hot_fd}<&-
+    if ! wait "$hot_pid"; then
+      local rc=$?
+      log_error "Failed to enumerate recently modified files under $local_vault_path (exit $rc)"
+      return 75
+    fi
+
+    if (( count > 0 )); then
+      log_info "Deferring ${count} hot files (mtime < ${hot_window_secs}s) from this sync"
+      log_info ${RSYNC_DYNAMIC_EXCLUDES[@]}
+    fi
+  fi
+}
+
+build_hot_window_excludes
+
 run_tracked_rsync -rltivPh "${RSYNC_DRY[@]}" --update --partial-dir=.rsync-partial --delay-updates \
-  "${RSYNC_EXCLUDES[@]}" \
+  "${RSYNC_EXCLUDES[@]}" "${RSYNC_DYNAMIC_EXCLUDES[@]}" \
   "$local_src" "$remote_rsync_dir"
 
 run_tracked_rsync -rltivPh "${RSYNC_DRY[@]}" --update --partial-dir=.rsync-partial --delay-updates \
-  "${RSYNC_EXCLUDES[@]}" \
+  "${RSYNC_EXCLUDES[@]}" "${RSYNC_DYNAMIC_EXCLUDES[@]}" "${RSYNC_BACKUP_REMOTE_TO_LOCAL[@]}" \
   "$remote_rsync_dir" "$local_src"
 
 # Update inventories post-sync so the ledger reflects the settled state
@@ -1084,6 +1185,8 @@ if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; t
   if [[ $do_dryrun == false ]]; then
     if (( ${#paths_to_stage[@]} > 0 )); then
       # Only stage what the run touched (initial status + deletions + rsync diffs)
+      exec {paths_fd}< <(printf '%s\0' "${!paths_to_stage[@]}")
+      paths_pid=$!
       while IFS= read -r -d '' path; do
         [[ -z "$path" ]] && continue
         # Check if the path is ignored
@@ -1120,7 +1223,13 @@ if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; t
         else
           debug_log "skip staging for vanished path: $(printf '%q' "$path")"
         fi
-      done < <(printf '%s\0' "${!paths_to_stage[@]}")
+      done <&"$paths_fd"
+      exec {paths_fd}<&-
+      if ! wait "$paths_pid"; then
+        rc=$?
+        log_error "Failed to enumerate paths to stage (exit $rc)"
+        exit 75
+      fi
     fi
 
     # Remove files that were ignored but not changed

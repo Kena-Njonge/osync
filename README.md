@@ -22,8 +22,8 @@ The primary entry point is `osync.sh`. Given a local directory path, a remote ho
 
 1. Validate that the local directory exists, the remote directory is reachable over SSH, and the local tree is a git repository.
 2. Load `.vault-directories`, which keeps the authoritative list of directories that should exist on both sides (or create it during seeding).
-3. Run `rsync` in both directions (dry-run by default) while keeping the directory ledger in sync.
-4. During a real run, clean up stale directories, stage the touched paths, and commit/push the result so the directory history follows the file transfers.
+3. Build a dynamic exclude list for "hot" files (recent mtimes) to avoid editor save races, then run `rsync` in both directions (dry-run by default).
+4. During a real run, reconcile deletions, clean up stale directories, stage the touched paths, and commit/push so the directory history follows the transfers.
 
 ## Requirements
 
@@ -31,7 +31,7 @@ The primary entry point is `osync.sh`. Given a local directory path, a remote ho
 - `rsync` 3.1.3 or newer.
 - `ssh` with key-based access to the remote host.
 - `git`; the local directory must be a git repository so the script can stage, commit, and push updates.
-- `python3` is only needed when `SYNC_DEBUG=true` to pretty-print raw byte diagnostics.
+- `python3` is optional. Used to normalize filename Unicode (NFC) when available and for extra diagnostics when `SYNC_DEBUG=true`.
 
 ## Usage
 
@@ -47,6 +47,21 @@ The primary entry point is `osync.sh`. Given a local directory path, a remote ho
 Notes on ignores:
 - `--ignore DIR` accepts directory paths only. Anything under that directory stays out of rsync, the deletion passes, and git staging.
 - `.gitignore` affects git status as usual but does not stop osync from transferring files; ignored files continue to sync unless their parent directories are excluded with `--ignore`.
+- `.osync-backups/` is excluded from transfer by default; backups are local-only.
+- `.gitignore` and `.gitattributes` are not transferred and are ignored by deletion logic (to avoid treating repo metadata as content).
+
+### Safety options (env vars)
+
+- `SYNC_HOT_WINDOW` (seconds, default `3`): defers files whose mtime is within the last N seconds to avoid racing with editor save cycles (truncate-then-write or atomic replace). Set to `0` to disable if you prefer immediate syncing.
+- `SYNC_BACKUP` (`true`/`false`, default `false`): when `true`, keeps a local backup of any file that would be overwritten during the remote→local pass under `.osync-backups/<timestamp>/remote-to-local/` (this path is excluded from sync).
+- `SYNC_DEBUG` (`true`/`false`, default `false`): enables additional diagnostics during runs. Safe to leave on; increases logging verbosity.
+
+Example with systemd user service:
+```
+[Service]
+Environment=SYNC_HOT_WINDOW=5
+Environment=SYNC_BACKUP=true
+```
 
 ## Getting started
 
@@ -54,7 +69,7 @@ Notes on ignores:
 2. Ensure the target directory is a git repository (`git init` + initial commit if you are starting from scratch).
 3. Add the remote host to your SSH config (e.g., `~/.ssh/config`) and verify you can connect without prompts; make sure the target remote directory already exists.
 4. Perform the first synchronization and seed the directory ledger:
-During this sync the history will be unified, meaning the resulting synced directory will include files and dirs from both dirs.
+   During this sync the history will be unified, meaning the resulting synced directory will include files and dirs from both sides.
    ```bash
    ./osync.sh /path/to/local/dir <host> /path/to/remote/dir --seed --realrun --ignore ... --ignore ...
    ```
