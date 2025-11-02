@@ -411,7 +411,7 @@ RSYNC_DYNAMIC_EXCLUDES=()
 
 # Optional: keep local backups before remote→local overwrites.
 # Enable with SYNC_BACKUP=true. Backups live under .osync-backups/<timestamp>/remote-to-local/
-backup_enabled=${SYNC_BACKUP:-false}
+backup_enabled=${SYNC_BACKUP:-true}
 RSYNC_BACKUP_REMOTE_TO_LOCAL=()
 if [[ "$backup_enabled" == true ]]; then
   backup_stamp_dir="${local_vault_path%/}/.osync-backups"
