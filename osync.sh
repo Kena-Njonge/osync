@@ -414,7 +414,7 @@ RSYNC_DYNAMIC_EXCLUDES=()
 backup_enabled=${SYNC_BACKUP:-false}
 RSYNC_BACKUP_REMOTE_TO_LOCAL=()
 if [[ "$backup_enabled" == true ]]; then
-  backup_stamp_dir="${local_vault_path%/}/.osync-backups/$(date +'%Y-%m-%d_%H-%M-%S')/remote-to-local"
+  backup_stamp_dir="${local_vault_path%/}/.osync-backups"
   mkdir -p "$backup_stamp_dir" || true
   RSYNC_BACKUP_REMOTE_TO_LOCAL=( --backup --backup-dir="$backup_stamp_dir" )
   log_info "Local backups enabled: $backup_stamp_dir"
@@ -1140,6 +1140,8 @@ build_hot_window_excludes() {
   RSYNC_DYNAMIC_EXCLUDES=()
   if [[ "$hot_window_secs" =~ ^[0-9]+$ ]] && (( hot_window_secs > 0 )); then
     local count=0
+    exec {hot_fd}< <(LC_ALL=C find "$local_vault_path" -type f -newermt "-${hot_window_secs} seconds" -printf '%P\0' 2>/dev/null)
+    local hot_pid=$!
     while IFS= read -r -d '' rel; do
       [[ -z "$rel" ]] && continue
       # Skip ignored paths and repo metadata files
@@ -1148,10 +1150,17 @@ build_hot_window_excludes() {
       fi
       RSYNC_DYNAMIC_EXCLUDES+=( "--exclude=$rel" )
       ((count+=1))
-    done < <(LC_ALL=C find "$local_vault_path" -type f -newermt "-${hot_window_secs} seconds" -printf '%P\0' 2>/dev/null)
+    done <&"$hot_fd"
+    exec {hot_fd}<&-
+    if ! wait "$hot_pid"; then
+      local rc=$?
+      log_error "Failed to enumerate recently modified files under $local_vault_path (exit $rc)"
+      return 75
+    fi
 
     if (( count > 0 )); then
       log_info "Deferring ${count} hot files (mtime < ${hot_window_secs}s) from this sync"
+      log_info ${RSYNC_DYNAMIC_EXCLUDES[@]}
     fi
   fi
 }
@@ -1176,6 +1185,8 @@ if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; t
   if [[ $do_dryrun == false ]]; then
     if (( ${#paths_to_stage[@]} > 0 )); then
       # Only stage what the run touched (initial status + deletions + rsync diffs)
+      exec {paths_fd}< <(printf '%s\0' "${!paths_to_stage[@]}")
+      paths_pid=$!
       while IFS= read -r -d '' path; do
         [[ -z "$path" ]] && continue
         # Check if the path is ignored
@@ -1212,7 +1223,13 @@ if git -C "$local_vault_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; t
         else
           debug_log "skip staging for vanished path: $(printf '%q' "$path")"
         fi
-      done < <(printf '%s\0' "${!paths_to_stage[@]}")
+      done <&"$paths_fd"
+      exec {paths_fd}<&-
+      if ! wait "$paths_pid"; then
+        rc=$?
+        log_error "Failed to enumerate paths to stage (exit $rc)"
+        exit 75
+      fi
     fi
 
     # Remove files that were ignored but not changed
