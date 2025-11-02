@@ -224,4 +224,48 @@ touch "$tmp_local/.git/index.lock"
 run_sync_expect_status 75
 rm -f "$tmp_local/.git/index.lock"
 
+#
+# Hot-file exclusion window should defer syncing of a file modified very recently
+# and avoid overwriting a locally-hot file from the remote. After the window
+# elapses, the file should sync normally.
+#
+log 'Test: hot-file window defers newly-modified local file'
+# 1) Seed a file and propagate baseline
+printf 'BASE\n' > "$tmp_local/hot.txt"
+run_sync
+base_size_local=$(file_size_local hot.txt)
+base_size_remote=$(file_size_remote hot.txt)
+if [[ "$base_size_local" != "$base_size_remote" ]]; then
+  log "Error: baseline size mismatch before hot test"
+  exit 1
+fi
+# 2) Modify locally and immediately sync with a hot window
+printf 'BASE-CHANGED-LONGER\n' > "$tmp_local/hot.txt"
+changed_size_local=$(file_size_local hot.txt)
+if [[ "$changed_size_local" -le "$base_size_local" ]]; then
+  log "Error: changed file should be larger to detect deferral"
+  exit 1
+fi
+SYNC_HOT_WINDOW=5 "$SCRIPT" "$tmp_local" "$remote_host" "$tmp_remote" --realrun
+# Remote should still have the baseline size (deferral), local should keep the new size
+post_size_remote=$(file_size_remote hot.txt)
+post_size_local=$(file_size_local hot.txt)
+if [[ "$post_size_remote" != "$base_size_remote" ]]; then
+  log "Error: remote changed despite hot-window deferral"
+  exit 1
+fi
+if [[ "$post_size_local" != "$changed_size_local" ]]; then
+  log "Error: local content was overwritten during hot-window run"
+  exit 1
+fi
+# 3) After the window elapses, the change should sync
+sleep 6
+run_sync
+final_size_remote=$(file_size_remote hot.txt)
+if [[ "$final_size_remote" != "$changed_size_local" ]]; then
+  log "Error: remote did not receive update after hot window elapsed"
+  exit 1
+fi
+
+
 log 'All tests passed'

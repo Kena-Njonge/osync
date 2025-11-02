@@ -155,7 +155,8 @@ quote_remote_path() {
   fi
 }
 
-# Add a Directory to the ignore set
+# Add a Directory to the ignore set (paths are interpreted
+# relative to the vault root, not the filesystem root)
 add_ignore_dir() {
   local dir="$1"
 
@@ -175,7 +176,7 @@ add_ignore_dir() {
     exit 1
   fi
   if [[ "$dir" == /* ]]; then
-    log_error "Ignore directories must be relative to the directory of the script (no leading /): $dir"
+    log_error "Ignore directories must be relative to the vault root (no leading /): $dir"
     exit 1
   fi
   if [[ "$dir" == *"../"* || "$dir" == ".." || "$dir" == "../" ]]; then
@@ -275,6 +276,8 @@ seed=false
 add_ignore_dir ".git"
 # Ensure rsync partial files are ignored/excluded on both sides
 add_ignore_dir ".rsync-partial"
+# Keep local safety backups out of sync if enabled
+add_ignore_dir ".osync-backups"
 while (($#)); do
   case "$1" in
     --realrun)
@@ -305,6 +308,43 @@ while (($#)); do
       ;;
   esac
 done
+
+
+
+# Line-ending policy: create once, then one-time renormalize
+need_renorm=false
+
+if [ ! -f "$local_vault_path/.gitattributes" ]; then
+  cat > "$local_vault_path/.gitattributes" <<'EOF'
+* text=auto eol=lf
+# keep binaries quiet
+*.png binary 
+*.jpg binary 
+*.gif binary
+EOF
+  need_renorm=true
+else
+  # If I later change the policy, trigger renorm again:
+  if ! git -C "$local_vault_path" diff --quiet -- ".gitattributes"; then
+    need_renorm=true
+  fi
+fi
+
+if [ "$need_renorm" = true && $seed = true]; then
+  git -C "$local_vault_path" add .gitattributes
+  # One-time repo-wide normalization so future diffs don’t explode
+  # We only renormalize in seed runs so that we don't blow up tracking.
+  # So that they can be transfered, if we stage all they will never be transfered to remote and deletions will be repropagated
+  git -C "$local_vault_path" add --renormalize .
+  git -C "$local_vault_path" commit -m "Add/normalize line endings via .gitattributes" || true
+fi
+
+# Ensure repo-scoped settings (safe)
+git -C "$local_vault_path" config --local core.autocrlf input
+git -C "$local_vault_path" config --local core.safecrlf warn
+git -C "$local_vault_path" config --local merge.renormalize true
+git -C "$local_vault_path" config --local core.filemode false ;;
+
 
 local_src="${local_vault_path%/}/"
 remote_vault_dir_path="${remote_vault_dir_path%/}/"
@@ -361,6 +401,34 @@ RSYNC_EXCLUDES=()
 for dir in "${ignore_dirs[@]}"; do
   RSYNC_EXCLUDES+=("--exclude=$dir/")
 done
+
+# Exclude files that changed very recently (to avoid racing with editors that
+# truncate-then-write). Configure with SYNC_HOT_WINDOW=<seconds> (0 disables). Default: 3s.
+hot_window_secs="${SYNC_HOT_WINDOW:-3}"
+RSYNC_DYNAMIC_EXCLUDES=()
+if [[ "$hot_window_secs" =~ ^[0-9]+$ ]] && (( hot_window_secs > 0 )); then
+  # Build a list of hot files relative to the vault root without changing cwd
+  # Use -newermt "-Xs" (GNU find) to select files modified within the last X seconds
+  while IFS= read -r -d '' rel; do
+    [[ -z "$rel" ]] && continue
+    # 'rel' is path relative to $local_vault_path due to %P
+    RSYNC_DYNAMIC_EXCLUDES+=( "--exclude=$rel" )
+  done < <(LC_ALL=C find "$local_vault_path" -type f -newermt "-${hot_window_secs} seconds" -printf '%P\0' 2>/dev/null)
+  if (( ${#RSYNC_DYNAMIC_EXCLUDES[@]} > 0 )); then
+    log_info "Deferring ${#RSYNC_DYNAMIC_EXCLUDES[@]} hot files (mtime < ${hot_window_secs}s) from this sync"
+  fi
+fi
+
+# Optional: keep local backups before remote→local overwrites.
+# Enable with SYNC_BACKUP=true. Backups live under .osync-backups/<timestamp>/remote-to-local/
+backup_enabled=${SYNC_BACKUP:-false}
+RSYNC_BACKUP_REMOTE_TO_LOCAL=()
+if [[ "$backup_enabled" == true ]]; then
+  backup_stamp_dir="${local_vault_path%/}/.osync-backups/$(date +'%Y-%m-%d_%H-%M-%S')/remote-to-local"
+  mkdir -p "$backup_stamp_dir" || true
+  RSYNC_BACKUP_REMOTE_TO_LOCAL=( --backup --backup-dir="$backup_stamp_dir" )
+  log_info "Local backups enabled: $backup_stamp_dir"
+fi
 
 # Ensure UTF-8 locale so non-ASCII filenames are handled predictably
 export LANG=${LANG:-en_US.UTF-8}
@@ -1067,11 +1135,11 @@ fi
 # ----------------- Updates both ways -----------------
 
 run_tracked_rsync -rltivPh "${RSYNC_DRY[@]}" --update --partial-dir=.rsync-partial --delay-updates \
-  "${RSYNC_EXCLUDES[@]}" \
+  "${RSYNC_EXCLUDES[@]}" "${RSYNC_DYNAMIC_EXCLUDES[@]}" \
   "$local_src" "$remote_rsync_dir"
 
 run_tracked_rsync -rltivPh "${RSYNC_DRY[@]}" --update --partial-dir=.rsync-partial --delay-updates \
-  "${RSYNC_EXCLUDES[@]}" \
+  "${RSYNC_EXCLUDES[@]}" "${RSYNC_DYNAMIC_EXCLUDES[@]}" "${RSYNC_BACKUP_REMOTE_TO_LOCAL[@]}" \
   "$remote_rsync_dir" "$local_src"
 
 # Update inventories post-sync so the ledger reflects the settled state

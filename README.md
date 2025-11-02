@@ -46,6 +46,18 @@ Notes on ignores:
 - `--ignore DIR` accepts directory paths only. Anything under that directory stays out of rsync, the deletion passes, and git staging.
 - `.gitignore` affects git status as usual but does not stop osync from transferring files; ignored files continue to sync unless their parent directories are excluded with `--ignore`.
 
+### Safety options (env vars)
+
+- `SYNC_HOT_WINDOW` (seconds, default `3`): skips files whose mtime is within the last N seconds to avoid racing with editors that truncate-then-write. Set to `0` to disable if you prefer immediate syncing during active edits.
+- `SYNC_BACKUP` (`true`/`false`, default `false`): when `true`, keeps a local backup of any file that would be overwritten during the remote→local pass under `.osync-backups/<timestamp>/remote-to-local/`. The backup directory is excluded from sync.
+
+Example with systemd user service:
+```
+[Service]
+Environment=SYNC_HOT_WINDOW=5
+Environment=SYNC_BACKUP=true
+```
+
 ## Getting started
 
 1. Clone or copy this repository on the machine that hosts your target local directory.
