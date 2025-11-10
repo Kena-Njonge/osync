@@ -2,6 +2,9 @@
 
 `osync` is a small personal project that keeps two directories in sync across machines. It wraps `rsync` and `git` so that your files (and the history around them) stay aligned with as little ceremony as possible.
 
+⚠️ Note: This project is not affiliated with or related to any other project named “osync.”
+If you were looking for [deajans osync](https://github.com/deajan/osync), this isn’t it.
+
 ## Why osync?
 
 - Works over plain SSH, so any reachable host can participate without extra services.
