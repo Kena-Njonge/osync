@@ -5,6 +5,8 @@
 ⚠️ Note: This project is not affiliated with or related to any other project named “osync.”
 If you were looking for [deajans osync](https://github.com/deajan/osync), this isn’t it.
 
+⚠️ Note: Date: 17.11.25 Curretntly I am a bit strapped for time and there is a bug that I need to deal with that I haven't yet which really affects live syncing behaviour. I will update this notice when I finally fix it.
+
 ## Why osync?
 
 - Works over plain SSH, so any reachable host can participate without extra services.
