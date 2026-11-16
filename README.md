@@ -4,7 +4,7 @@ This project is officially deprecated and not maintained.
 # ⛔️ Retrospective and Context
 I never got around to applying the fixes that I wanted to and I won't. I offer an analysis of what lead to this deprecation below. I am happy with the fact that I wrote some interesting code, I am dissatisfied with the way that everything panned out. 
 
-I ruminated about this for a while a to gain clarity about what I should do differently in the future, and also wanted to give y'all some perspective into why this project soft-failed, such that anyone who cares to read may not make the same mistakes that I did, some of the advice may apply to life in general, but they were written in relation to this code in particular.
+I ruminated about this for a while a to gain clarity about what I should do differently in the future, and also wanted to give y'all some perspective into why this project soft-failed, such that anyone who cares to read may not make the same mistakes that I did. Some of the advice may apply to life in general, but they were written in relation to this code in particular.
 
 The retrospective will be linked to here once I am done writing it, it is still WIP atm. 
 
